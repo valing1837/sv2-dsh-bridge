@@ -186,6 +186,11 @@ caught   tempo-mark-reads-positionblick.lua
 
 见 **[`docs/全参流程.md`](docs/全参流程.md)** —— 八步流程 + 六条纪律。
 
+> **想把这套经验给别的 agent 用?** 见 **[`docs/AGENT-PROMPT.md`](docs/AGENT-PROMPT.md)** ——
+> 一份**不绑定任何工具名**的通用提示词,直接复制进系统提示词即可。
+> 它讲的是 SV2 的**语义事实**(唱法互斥、API 读不到继承值、脚本切不了当前组)
+> 和**作业纪律**(一次一样、fail-closed、不在宿主回调里做 IO)。
+
 核心判据:**"全参"不是"把所有参数都用上",而是"每个参数都跟着歌曲走"。**
 分段常量不算;逐音符变化才算。
 
@@ -229,7 +234,8 @@ tools/               离线测试与工具
   make-package.ps1     一键出包 + 自检
 docs/                文档
   PACKAGE-README.md    分发包说明(打包模板)
-  全参流程.md           调参标准作业程序
+  全参流程.md           调参标准作业程序(写给本仓库的使用者)
+  AGENT-PROMPT.md      **通用 agent 提示词** —— 不绑工具名,可给任何 agent 用
   音频转音符.md         音频转音符的管线笔记
 probe/               真机探针脚本
 ```
