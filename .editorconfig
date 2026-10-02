@@ -1,0 +1,25 @@
+# 所有文件都用 UTF-8(无 BOM)
+# 仓库里有中文文档和中文注释,编码错了会直接乱码
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.lua]
+# SV2 侧跑在 Lua 5.4 上;官方示例统一 2 空格
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾两个空格是"硬换行",不能剪
+trim_trailing_whitespace = false
+
+[*.{py,ps1}]
+indent_size = 4
+
+[*.ps1]
+end_of_line = crlf

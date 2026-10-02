@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Offline harness (Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install tool deps
+        working-directory: tools
+        run: npm install --no-audit --no-fund
+
+      - name: Lua syntax, metadata and guard checks
+        working-directory: tools
+        run: |
+          node check-lua.mjs ../plugin/sv/DSHBridge.lua ../plugin/sv/DSHPanel.js
+          node check-file.mjs ../plugin/sv/DSHBridge.lua ../plugin/sv/DSHPanel.js ../plugin/index.js ../README.md
+
+      - name: Plugin tool definitions
+        working-directory: tools
+        run: node check-plugin.mjs
+
+      - name: Behavioural harness (41 tests)
+        working-directory: tools
+        run: node harness.mjs
+
+      - name: Mutation harness (every mutant must be caught)
+        working-directory: tools
+        run: node check-mutants.mjs
