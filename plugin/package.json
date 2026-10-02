@@ -1,0 +1,28 @@
+{
+  "name": "dsh-sv-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drive Synthesizer V Studio 2 from DeepSeek Harness: sv_* tools over a local file bridge, plus a side panel in SV2 that talks back into a DSH session.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "synthesizer-v", "sv2"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    }
+  },
+  "meta": {
+    "title": "SV2 桥",
+    "description": "用对话直接读写 Synthesizer V Studio 2 里打开的工程,并让 SV2 侧栏能反过来跟你说话。"
+  }
+}

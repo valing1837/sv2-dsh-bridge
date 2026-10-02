@@ -1,0 +1,1 @@
+ERROR: ENOENT, dsh\node_modules\@deepseek-ai\dsh-agent\lib\typert.host.js not found in C:\Users\huang\AppData\Local\Programs\DeepSeek Harness\resources\app.asar

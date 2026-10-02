@@ -1,0 +1,16 @@
+# Python 依赖 —— 体积大(44 MB),按需重新下载,不进仓库
+py-deps/
+
+# 运行时产物
+tools/.mutants/
+tools/.harness-run/
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.bak-*
+*.pre-restore-*

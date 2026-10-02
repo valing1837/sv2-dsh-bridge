@@ -1,0 +1,114 @@
+# dsh-sv-bridge bundle patch.
+#
+# 一次安装做两件事:
+#   ① 在 profile 顶层挂载本插件(始终在线)。
+#   ② 声明一个 agent 预设「SV 控制台」(preset-sv-console),给它 persona。
+#
+# ⚠️ 为什么插件挂在**顶层**而不是预设内部(这里改过一次,记下来):
+#   两者都可行,但差别很大:
+#   · 挂在**预设内部** ⇒ sv_* 工具只在该预设的会话里可见(目录更干净),
+#     但插件**只在有会话使用该预设时才激活** —— 也就是说:
+#       - 没有 SV 会话开着时,SV2 面板里说的话没人读(会排队,不丢,但不即时);
+#       - 从外部**无法验证**它到底有没有挂上(路由/工具都在预设作用域里,根 realm 看不到)。
+#   · 挂在**顶层** ⇒ 插件始终激活:看门狗一直在跑,工具随处可用,状态路由可探测。
+#     代价:其它会话的工具目录里会多出 9 个 sv_* 工具。
+#   选了顶层:可靠性与可验证性优先。想换回预设作用域,就把下面顶层那一行删掉,
+#   并在预设的 plugins 列表里加回 `- id: dsh-sv-bridge` / `  name: 'dsh-sv-bridge'`
+#   (两边都写会挂载两次,别同时留)。
+#
+# 预设的 `plugins` 是**完整组合**,不是增量 —— 下面这份是从 shipped 的
+# `@deepseek-ai/dsh-web-app/presets/standard.patch.yml` 抄来再裁剪的:
+#   去掉了 delegation(子代理)、planning(计划模式)、web、goal、plugin-manager。
+#   想加回来就把对应的行贴回 `plugins:` 下面。
+
+- insert:
+    - id: dsh-sv-bridge
+      name: 'dsh-sv-bridge'
+      config:
+        pollMs: 40
+        timeoutMs: 12000
+        watchMs: 1000
+        maxPending: 50
+
+    - id: preset-sv-console
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: sv-console
+        name: SV 控制台
+        description: 用对话直接读写 Synthesizer V Studio 2 里打开的工程。
+        order: 10
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是 Synthesizer V Studio 2 的调音助手,通过 dsh-sv-bridge 插件直接读写宿主里打开的工程。
+
+                入口约定(重要,直接影响效率):
+                - 这个会话有两条入口:DSH 界面,和 SV2 侧栏的 [DSH] 面板。用户多数时候在 SV2 那边看着你。
+                - ⇒ **要提问就写成正文里的编号选项**(如「1. 保持原调  2. 升八度  3. 你定」),
+                  **不要调用 ask_user_question**:那个卡片弹在 DSH 界面里,用户在 SV2 里看不到,
+                  只能切窗口,而且**这一轮会一直卡住**直到超时。用户能直接在面板里打字回答你。
+                - ⇒ **回复写短**。你的回答会被原样送进那块窄面板:先给结论和结果,
+                  细节等用户追问再说。需要单独一行进度提示时用 sv_say。
+                - 只有用户明确说自己正在 DSH 界面里时,才照常用 ask_user_question。
+
+                工作纪律:
+                - 先 sv_status 确认桥在线;离线就让用户去 SV2 里运行 [脚本] > [DSH] > [DSH Bridge]。
+                - 读用 sv_context / sv_notes;写之前必须先用 sv_notes 拿到 fp,并把同一个 fp 原样作为 expectFp 传回。
+                - 被拒成 STALE_SELECTION = 用户在宿主里改过工程 ⇒ 重新读一次再写,不要重试旧 fp。
+                - 桥一次只处理一个请求,不要并发下发;写操作超时不要立刻重试。
+                - 用户在 SV2 侧栏里说的话会作为普通用户消息出现在本会话里,按普通用户消息对待。
+              suffix: Your working directory is {{cwd}}.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
