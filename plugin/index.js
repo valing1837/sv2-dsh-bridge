@@ -124,6 +124,39 @@ const DEFAULTS = {
   maxPending: 50,
 }
 
+/**
+ * 把 profile 给的配置夹成**安全值**,并如实记下改了什么。
+ *
+ * 为什么要有它:profile 里那几项(见 cordis.patch.yml)是裸值 —— 写错一个类型,
+ * 坏的是**行为**而不是启动。最典型的:`timeoutMs: "abc"` ⇒ `NaN` ⇒
+ * `setTimeout(NaN)` 立刻触发 ⇒ 每次调用都"超时",而报错信息完全看不出原因。
+ * 所以这里逐项验数、夹到合理区间,并把改动记下来由 sv_status 报出去。
+ *
+ * 为什么不用 Config schema:那要 import `@deepseek-ai/schemastery`,而本 bundle
+ * **刻意不 import 任何 @deepseek-ai/* 包**(它是 link: 进 profile 的,模块解析链
+ * 与宿主不同,不能指望解析得到)。手工夹一下就够了,而且能离线测(导出是纯函数)。
+ */
+export function sanitizeConfig(raw) {
+  const cfg = { ...DEFAULTS, ...(raw ?? {}) }
+  const notes = []
+  const clamp = (key, min, max) => {
+    const value = typeof cfg[key] === 'number' ? cfg[key] : Number(cfg[key])
+    if (!Number.isFinite(value)) {
+      notes.push(`${key}=${JSON.stringify(cfg[key])} 不是数字 ⇒ 用默认 ${DEFAULTS[key]}`)
+      cfg[key] = DEFAULTS[key]
+      return
+    }
+    const fixed = Math.min(max, Math.max(min, Math.trunc(value)))
+    if (fixed !== value) notes.push(`${key}=${value} 超出 ${min}..${max} ⇒ 夹到 ${fixed}`)
+    cfg[key] = fixed
+  }
+  clamp('pollMs', 5, 2000)
+  clamp('timeoutMs', 200, 300000)
+  clamp('watchMs', 100, 60000)
+  clamp('maxPending', 1, 1000)
+  return { cfg, notes }
+}
+
 // ---------------------------------------------------------------------------
 // 模型面向的 JSON Schema
 // ---------------------------------------------------------------------------
@@ -476,7 +509,7 @@ export function capPanelText(t, max = PANEL_TEXT_MAX) {
 export function buildTools(deps) {
   const {
     dir, state, cfg, setupError, requireDir, saveStateNow, pushToPanel, autoBind, callOp,
-    readSnapshots, readLastOp, frozenCrumb, getLastSnapshotError,
+    readSnapshots, readLastOp, frozenCrumb, getLastSnapshotError, configNotes,
   } = deps
   void cfg
   void requireDir
@@ -501,6 +534,7 @@ export function buildTools(deps) {
         dir: base ?? null,
         dirReady: Boolean(base),
         setupError: setupError ? String(setupError.message ?? setupError) : null,
+        configNotes,
         bridgeDirReported: hb?.dir ?? null,
         dirMatches: base && hb?.dir ? path.resolve(hb.dir) === path.resolve(base) : null,
         bridgeVersion: hb?.bridge ?? null,
@@ -802,6 +836,7 @@ export function buildTools(deps) {
         online,
         dir: base ?? null,
         dirMatches,
+        configNotes,
         bridgeVersion: hb?.bridge ?? null,
         hostName: hb?.hostName ?? null,
         hostVersion: hb?.version ?? null,
@@ -841,7 +876,7 @@ export function buildTools(deps) {
 // ---------------------------------------------------------------------------
 
 export function apply(ctx, config) {
-  const cfg = { ...DEFAULTS, ...(config ?? {}) }
+  const { cfg, notes: configNotes } = sanitizeConfig(config)
 
   // ⚠️ 目录准备**不能**在 apply 阶段抛错:预设里的任何一个插件激活失败,
   //    整个预设(连 persona 和其它工具)都会跟着挂。所以这里只记下错误,
@@ -997,6 +1032,7 @@ export function apply(ctx, config) {
     state,
     cfg,
     setupError,
+    configNotes,
     requireDir,
     saveStateNow,
     pushToPanel,
@@ -1097,6 +1133,11 @@ export function apply(ctx, config) {
           '先 sv_status 看桥在不在线;不在线就让用户去 SV2 里运行 [脚本] > [DSH] > [DSH Bridge]。',
           '桥"看起来不对"时用 **sv_doctor** —— 它会跑一次宿主内自检,并给出下一步该做什么,',
           '比你逐条猜(没跑 / 被关 / 目录不一致 / 脚本过期 / 被模态框冻住)快得多。',
+          '**开工三件事**:① sv_status 看桥在不在;② 看工程(sv_context;大工程先 get_summary);',
+          '③ 问清这一轮要什么再动手 —— 不要一上来就改音符。',
+          '**读不到就说读不到**:桥报错就把原文给用户看,不要用"大概是…"填一个你其实没读到的值。',
+          '**大工程不要整组读进来**:先 get_summary 看统计(条数 / 音高范围 / 重叠),再按需读片段 ——',
+          '几百个音符的明细既慢、又会把上下文冲垮。',
           '任何写入之前先 sv_notes 拿到 fp,并把同一个 fp 原样作为 expectFp 传回去;',
           '被拒成 STALE_SELECTION 说明用户在宿主里改过工程,重新读一次再写,不要重试同一个 fp。',
           '桥一次只能处理一个请求,不要并发下发;写操作不要"超时就重试"。',
