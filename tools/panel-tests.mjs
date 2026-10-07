@@ -132,17 +132,20 @@ check('category 纯 ASCII', /^[\x20-\x7e]+$/.test(info.category), info.category)
 check('minEditorVersion ≥ 131330(官方对侧栏的下限)', info.minEditorVersion >= 131330, info.minEditorVersion)
 
 // ---------------------------------------------------------------------------
-console.log('\n— 空闲态布局')
+console.log('\n— 空闲态布局(2026-10-07 大改后的版面)')
 const idle = ctx.getSidePanelSectionState()
 check('返回 {title, rows} 且 title 纯 ASCII',
   /^[\x20-\x7e]+$/.test(idle.title) && Array.isArray(idle.rows), idle.title)
 const idleAreas = areasOf(idle)
-check('有日志框与输入框', idleAreas.length >= 2, idleAreas.length)
-check('日志框是 readOnly(只放 DSH 的回复)', idleAreas[0].readOnly === true)
-check('日志框高 460(用户要求的大框)', idleAreas[0].height === 460, idleAreas[0].height)
-check('输入框高 72(用户要在里面打字/答题)', idleAreas[1].height === 72, idleAreas[1].height)
-check('快捷动作 6 个按钮都在', buttonsOf(idle).length >= 6 + 3 + 1, buttonsOf(idle).length)
-check('一键调参按钮在', buttonsOf(idle).some((b) => /一键调参/.test(b.text)))
+check('有回复区与输入框', idleAreas.length >= 2, idleAreas.length)
+check('回复区是 readOnly(只放 DSH 的回复)', idleAreas[0].readOnly === true)
+check('回复区高 300(快捷动作删掉后收紧到这个高度)', idleAreas[0].height === 300, idleAreas[0].height)
+check('小输入框高 56(用户要的是"小"输入框)', idleAreas[1].height === 56, idleAreas[1].height)
+// ⚠️ 用户 2026-10-07:"那些快捷方式可有可无了" ⇒ 面板只剩 发送/刷新/清空 三个按钮。
+const idleButtons = buttonsOf(idle).map((b) => b.text)
+check('只剩 发送 / 刷新 / 清空 三个按钮', idleButtons.length === 3, idleButtons)
+check('六个快捷动作**一个都不在了**',
+  !idleButtons.some((t) => /看工程|对齐音频|体检重叠|量化|读转录|填歌词|一键调参/.test(t)), idleButtons)
 check('每行最多 3 列(侧栏里再多就挤了)', widgets(rowsOf(idle)).every((w) => w.columns <= 3),
   Math.max(...widgets(rowsOf(idle)).map((w) => w.columns)))
 
@@ -164,7 +167,7 @@ for (const b of buttonsOf(idle)) {
   minWidth = Math.max(minWidth, textPx(b.text) / b.share + CELL_PAD + OUTER_PAD)
 }
 console.log(`  [--]   全部按钮都不被截断所需的最小侧栏宽度 ≈ ${Math.ceil(minWidth)}px`)
-check('这个宽度 ≤ 260px(窄侧栏也还能用)', minWidth <= 260, Math.ceil(minWidth))
+check('这个宽度 ≤ 200px(窄侧栏也还能用)', minWidth <= 200, Math.ceil(minWidth))
 
 // ---------------------------------------------------------------------------
 console.log('\n— 选择题:题目来了(用户 2026-10-02 的三条要求)')
@@ -184,18 +187,36 @@ check('而是挂了个"待刷新"标记', ctx.st.askNeedsRefresh === true)
 
 const ask = ctx.getSidePanelSectionState()
 const askAreas = areasOf(ask)
-check('有题目时日志框让位(460 → 170)', askAreas[0].height === 170, askAreas[0].height)
-check('输入框高度不变(答题也要打字)', askAreas[1].height === 72, askAreas[1].height)
-check('快捷动作先收起来(答题期间用不上,别跟选项抢地方)',
-  !buttonsOf(ask).some((b) => /看工程|对齐音频|体检重叠|量化|读转录|填歌词/.test(b.text)),
-  buttonsOf(ask).map((b) => b.text))
-check('一键调参也收起来', !buttonsOf(ask).some((b) => /一键调参/.test(b.text)))
+check('有题目时回复区让位(300 → 110)', askAreas[0].height === 110, askAreas[0].height)
+check('有题目时小输入框更矮(56 → 44,把地方让给选项)', askAreas[1].height === 44, askAreas[1].height)
 const optionRows = rowsOf(ask).filter((r) => r.type === 'Container' && r.columns.length === 1 &&
-  r.columns[0].type === 'Button' && !/发送给 DSH|刷新|清空/.test(r.columns[0].text))
+  r.columns[0].type === 'Button' && !/发送|刷新|清空/.test(r.columns[0].text))
 check('4 个选项**竖排、一行一个**(用户明确要求,并排会把文字挤窄)',
   optionRows.length === 4, optionRows.length)
 check('选项文字也在标签区重复了一遍(按钮被截断也看得到全貌)',
   labelsOf(ask).some((t) => /这一段怎么处理/.test(t)))
+
+// ⚠️⚠️ 用户 2026-10-07 的新要求:"用户不满意的话就在**选项下面**加个小输入框"。
+//      (2026-10-02 那版是反的 —— 输入框在上、选项在下。这一条就是那次改动的判据。)
+const rowIndexOf = (state, pred) => rowsOf(state).findIndex(pred)
+const isInputRow = (r) => r.type === 'Container' && r.columns.length === 1 &&
+  r.columns[0].type === 'TextArea' && r.columns[0].value === ctx.wInput
+const isLogRow = (r) => r.type === 'Container' && r.columns.length === 1 &&
+  r.columns[0].type === 'TextArea' && r.columns[0].value === ctx.wLog
+const inputRow = rowIndexOf(ask, isInputRow)
+const logRow = rowIndexOf(ask, isLogRow)
+const lastOptionRow = rowsOf(ask).reduce(
+  (n, r, i) => (r.type === 'Container' && r.columns.length === 1 && r.columns[0].type === 'Button' &&
+    !/发送|刷新|清空/.test(r.columns[0].text) ? i : n), -1)
+const hintRow = rowIndexOf(ask, (r) => r.type === 'Label' && /不满意/.test(r.text || ''))
+check('版面顺序:回复区 → 选项 → 小输入框',
+  logRow >= 0 && lastOptionRow > logRow && inputRow > lastOptionRow,
+  { logRow, lastOptionRow, inputRow })
+check('选项**下面**有一行"不满意就自己写"的提示(就在输入框上面)',
+  hintRow > lastOptionRow && hintRow < inputRow, { lastOptionRow, hintRow, inputRow })
+check('选项按钮在发送按钮那一行**之前**(选项不是压在底部按钮下面)',
+  lastOptionRow < rowIndexOf(ask, (r) => r.type === 'Container' && r.columns.some((c) => c.text === '发送')),
+  lastOptionRow)
 
 // ⚠️ 判据是**总高度**,不是行数:题目会让行数变多(选项一行一个),
 //    但日志让出了 290px —— 在这么窄的侧栏里,决定"要不要滚"的是总高度。

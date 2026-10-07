@@ -1,27 +1,41 @@
 /**
- * DSH 面板(SidePanelSection)  v0.5.0
+ * DSH 面板(SidePanelSection)  v0.6.0
  * ============================================================================
  * SV2 侧栏里的一个小聊天框:把话发到 DSH,并显示 DSH 那边的回复。
  *
- * ⚠️ 侧栏**很窄**(宽度由宿主决定,我们控制不了)⇒ 布局要按"最窄"设计:
- *    · 每行最多 3 个控件(再多文案就被切);
- *    · 长文案单独占一行(一键调参);
- *    · **有选择题时把面板让给题目**:日志降高、快捷动作收起 ——
- *      整块从 ≈662px 降到 ≈450px,题目与竖排选项不用滚就能看全。
- *    · 装饰性文字要短(时间戳分隔行从 22 字符降到 7)。
+ * ── 2026-10-07 大改(用户四条要求)────────────────────────────────────────
+ *   ① "你的回答都要用选项表现出来" ⇒ 助手每次回复都推一组**按钮**(panel_ask),
+ *      面板的主要交互从"打字"变成"点一下"。
+ *   ② "用户不满意的话就在选项下面加个小输入框" ⇒ 选项**在上面**、小输入框在**下面**。
+ *      (注:2026-10-02 那版是反过来的 —— 输入框在上、选项在下。用户现在明确改了顺序。)
+ *   ③ "插件界面大改,要好看,美观" ⇒ 分区清楚、每行不超过 3 个控件、
+ *      标签文案极短、按钮文案短到不会截断;整体高度收紧(见下面的高度表)。
+ *   ④ "那些快捷方式可有可无了" ⇒ **删掉**六个快捷动作与"一键调参"按钮。
+ *      想干什么直接在小输入框里说(助手的提示词里本来就有整套流程)。
+ *
+ * ── 版面(从上到下)───────────────────────────────────────────────────────
+ *   [状态行]        一行,极短:组名 · 音符数 · 桥在线
+ *   [回复区]        只显示 DSH **最近一条**回复(完整历史在 DSH 那边看)
+ *   ── 有选项时 ──
+ *   [题目]          一行 Label
+ *   [选项 1..8]     竖排、一行一个(并排会把字挤窄截断)
+ *   [提示]          "不满意?在下面自己写:"
+ *   [小输入框]      44~56px,短
+ *   [发送][刷新][清空]  一行三个
+ *
+ * ⚠️ 侧栏**很窄**(宽度由宿主决定,我们控制不了)⇒ 布局按"最窄"设计:
+ *    每行最多 3 个控件;长文案单独占一行;装饰性文字要短。
  *    `tools/panel-tests.mjs` 会**算出**"让所有按钮都不被截断所需的最小宽度"(≈183px)
  *    并把它钉住 —— 侧栏再窄也还有个可测的下限。
  *
  * ⚠️ 为什么面板不直接读写文件:
- *   面板沙箱**没有任何文件能力**(连 Lua 面板里 `io.open` 都返回 nil)。
- *   所以面板只能走 project `scriptData`,由常驻的 DSHBridge.lua 做中继。
+ *    面板沙箱**没有任何文件能力**(连 Lua 面板里 `io.open` 都返回 nil)。
+ *    所以面板只能走 project `scriptData`,由常驻的 DSHBridge.lua 做中继。
  *
  * ⚠️⚠️ 两条硬纪律(用户 2026-10-02 明确要求「面板一重载就清空,.svp 里不留任何东西」):
- *   1. **日志只活在内存里** —— 面板一重载就没了,不写进工程文件。
- *   2. **中继键是临时的** —— 桥写一条,面板取走后**立刻 removeScriptData**;
- *      面板写一条,桥取走后也立刻删。静止状态下工程里不残留本插件的任何键。
- *      这就是为什么这里没有 inRev / log / ackSeq 之类的"状态键":
- *      任何长期存在的键都会被存进 .svp。
+ *    1. **日志只活在内存里** —— 面板一重载就没了,不写进工程文件。
+ *    2. **中继键是临时的** —— 桥写一条,面板取走后**立刻 removeScriptData**;
+ *       面板写一条,桥取走后也立刻删。静止状态下工程里不残留本插件的任何键。
  *
  * ⚠️ 面板里**任何错误都会弹宿主对话框并中断脚本** ⇒ 所有入口/回调一律 try/catch,
  *    `getSidePanelSectionState()` 必须永不抛错。
@@ -36,22 +50,26 @@
  */
 
 var PANEL = {
-  VERSION: '0.5.0',
+  VERSION: '0.6.0',
   K: {
     out: 'svdsh.panel.out', // 面板 → 桥(桥消费后立即删)
     in: 'svdsh.panel.in', // 桥 → 面板(面板消费后立即删)
   },
   POLL_MS: 500,
-  // ⚠️ 用户实测反馈:"框太小了,难找到一句话的开头" ⇒ 从 240 提到 460。
-  //    现在这个框**只放 DSH 的回复**,所以可以放心做大。
-  LOG_HEIGHT: 460,
-  // ⚠️ 但**有选择题的时候必须把它让出来**(用户 2026-10-07 再次提醒"侧栏的框挺小的"):
-  //    题目 + 最多 8 个选项(竖排一行一个,是用户明确要求的)本来就长,再压一个 460 的
-  //    日志框,整个面板就要滚 —— 而在这么窄的侧栏里,"要滚"就等于"看不见、找不到"。
-  //    这时候日志降到只够看题目,高度让给选项;答完(st.ask 清空)下一拍自动涨回去。
-  LOG_HEIGHT_ASK: 170,
-  // 用户要在这个框里打字、也要在里面回答我的选择题 ⇒ 从 44 提到 72
-  INPUT_HEIGHT: 72,
+  // 回复区高度。2026-10-07 大改:快捷动作删掉之后,面板不用再跟它们抢地方,
+  // 而用户这次要的是"分区清楚、整体收紧" ⇒ 从 460 收到 300(仍够看一条长回复)。
+  LOG_HEIGHT: 300,
+  // 有选项时把地方让给选项(用户 2026-10-07:"侧栏的框挺小的")。
+  // 选项最多 8 个竖排、每个 28px ⇒ 224px;日志只留够看题目的一句半。
+  LOG_HEIGHT_ASK: 110,
+  // 小输入框:用户这次明确要"**小**输入框" ⇒ 空闲 56(两三行)、有选项时 44(两行)。
+  INPUT_HEIGHT: 56,
+  INPUT_HEIGHT_ASK: 44,
+  // 最多渲染几个选项按钮。
+  // ⚠️ 用户 2026-10-02 说过"最多 8 个竖排",但 2026-10-07 又要"界面好看、整体收紧":
+  //    6 个 × 宿主默认按钮高(≈34px)≈ 204px,加上日志/输入/按钮刚好不滚;
+  //    8 个就要滚了。**超出的选项不会丢** —— 回复区里有全文,小输入框也能直接回。
+  MAX_CHOICES: 6,
   LOG_MAX: 20000, // 只截内存里的显示,不落盘
   LOG_KEEP: 60, // 最多留几条(每条可能很长,条数比字节数更该管)
   // 多久自动问一次"桥还在不在"。
@@ -66,74 +84,22 @@ var wSend = SV.create('WidgetValue')
 var wRefresh = SV.create('WidgetValue')
 var wClear = SV.create('WidgetValue')
 
-/* ── 快捷动作 ──────────────────────────────────────────────────────────────
- * 面板在 SV2 里,**不该逼用户每次都手打一遍常用指令**。这些按钮只是把一段
- * 固定的话塞进输入框再发出去 —— 走的是和手打完全相同的通道(`emit('input')`),
- * 所以 DSH 那边不需要任何特殊处理,也不存在"面板直连桥"的第二条通路。
- *
- * ⚠️ 这里**只放高频、幂等、无破坏性**的动作。像"删组""清音高线"这种就不放 ——
- *    面板上误点一下代价太大。
- * ⚠️ 文案要写成"用户会怎么说",而不是"op 名":DSH 收到的是人话,不是命令。
- */
-var QUICK_ACTIONS = [
-  {
-    text: '看工程',
-    tip: '读工程概况:几条轨、有没有音频轨、当前组多少音符',
-    msg: '看一下当前 SV2 工程的状况:几条轨、有没有音频轨(在哪条)、当前组是什么、多少音符。',
-  },
-  {
-    text: '对齐音频',
-    tip: '测 BPM 与第一拍,把音频挪到第 1 小节并写速度标',
-    msg: '把工程里的音频轨对齐到第 1 小节,并写入速度标。先测出 BPM 和第一拍在哪。',
-  },
-  {
-    text: '体检重叠',
-    tip: '检查当前组有没有音符重叠(重叠 = 违规)',
-    msg: '检查当前组的音符有没有重叠,把结果报给我。',
-  },
-  {
-    text: '量化',
-    tip: '吸附到十六分音符,先给计划再写',
-    msg: '把当前组的音符量化到十六分音符。先 dry-run 给我看计划,我说可以再写。',
-  },
-  {
-    text: '读转录',
-    tip: '读最上面那条轨的音符(SV2 转录的结果落在那)',
-    msg: '读一下最上面那条轨上的音符 —— 那应该是 SV2 自带转录出来的结果。先告诉我数量和大致范围。',
-  },
-  {
-    text: '填歌词',
-    tip: '把输入框里的文字当歌词,按音符顺序分配',
-    msg: '把这段歌词按音符顺序填到当前组:',
-    appendInput: true,
-  },
-]
-
-var wQuick = []
-for (var qi = 0; qi < QUICK_ACTIONS.length; qi++) {
-  wQuick.push(SV.create('WidgetValue'))
-}
-
 /* ── 控件 ─────────────────────────────────────────────────────────────────
  * ⚠️ 0.8.5 删掉了原来那套"调参滑条 + 预设下拉"(VOICE_PARAMS / wTuningRead /
  *    wTuningApply / wTuningReset / wPresetCombo / wVoiceParams / readVoice /
- *    applyVoice / rebuildModeWidgets / syncSlidersFromVoice / onOpResult /
- *    sendOp,以及 st 里的 voice / presets / modeWidgets / opSeq / opWait /
- *    voiceMsg / groupLabel)。
+ *    applyVoice / rebuildModeWidgets / syncSlidersFromVoice / onOpResult / sendOp)。
  *
- *    为什么删:用户 2026-10-02 裁定"不要滑条、不要预设"(见下面「一键调参」那段),
- *    之后 getSidePanelSectionState() 就**再也没有渲染过那些控件** ⇒ 回调永远不会触发
- *    ⇒ 整条链子是死代码。而死代码既没有测试、也没有真机路径,留着只会让人以为
- *    "面板能直接调参"。
+ * ⚠️ 0.6.0(本次)又删掉了六个**快捷动作**(看工程 / 对齐音频 / 体检重叠 / 量化 /
+ *    读转录 / 填歌词)与"一键调参"按钮 —— 用户 2026-10-07:"那些快捷方式可有可无了"。
+ *    删掉之后面板只剩:状态行 · 回复区 · 选项 · 小输入框 · 三个按钮。
+ *    想干什么直接在小输入框里说;助手的提示词里本来就有整套流程。
  *
  *    ⚠️ 桥那边的能力**保留**:面板直连 op 的白名单(`DSHBridge.lua` 的 PANEL_OP_OK)
- *       与中继协议仍在,并且现在有测试守着(harness 的「面板中继」一条)。
- *       将来要加回什么控件,直接 emit({kind:'op', op:'get_voice', ...}) 即可。
+ *       与中继协议仍在,并且有测试守着(harness 的「面板中继」一条)。
  */
-var wTuningToggle = SV.create('WidgetValue')
-// 选项按钮:预建 8 个复用(控件数量固定,就不用为了选项反复重建面板)
+// 选项按钮:预建 MAX_CHOICES 个复用(控件数量固定,就不用为了选项反复重建面板)
 var wAsk = []
-for (var wa = 0; wa < 8; wa++) wAsk.push(SV.create('WidgetValue'))
+for (var wa = 0; wa < PANEL.MAX_CHOICES; wa++) wAsk.push(SV.create('WidgetValue'))
 
 var st = {
   // ★ 只在内存里,重载即清空。
@@ -353,26 +319,6 @@ function send() {
   }
 }
 
-/**
- * 快捷动作:把一段固定的话塞进输入框再走正常的发送通道。
- * `appendInput` 为真时保留用户已经打好的内容(例如"填歌词"要带上歌词正文)。
- * ⚠️ 面板回调里**绝不抛错** —— 抛一次就是弹框 + 脚本中断。
- */
-function quickSend(action) {
-  try {
-    var msg = String(action.msg || '')
-    if (action.appendInput) {
-      var typed = String(wInput.getValue() === undefined ? '' : wInput.getValue())
-      typed = typed.replace(/^\s+|\s+$/g, '')
-      msg = msg + (typed ? '\n' + typed : '(歌词我打在输入框里了)')
-    }
-    wInput.setValue(msg)
-    send()
-  } catch (e) {
-    /* 忽略 */
-  }
-}
-
 /** 拉取桥送来的一行(取走就删键) */
 function pull() {  try {
     var chunk = readKey(PANEL.K.in)
@@ -404,15 +350,14 @@ function pull() {  try {
           choices: ctl.choices || [],
         }
         st.askAt = Date.now()
-        // ⚠️ **兜底**:同时把题目与选项写进日志框。
+        // ⚠️ **兜底**:同时把题目与选项写进回复区。
         //    用户实测反馈过"没看到选项" —— 按钮是控件,要面板重载才会出现;
-        //    而文字一定看得见,而且用户可以直接打字回答(走的是同一条通道)。
-        //    两条路并存:按钮能点就点,点不了就打字。
+        //    而文字一定看得见,而且用户可以直接在下面的小输入框里打字回答
+        //    (走的是同一条通道)。两条路并存:按钮能点就点,点不了就打字。
         var lines = ['【请选择】' + st.ask.prompt]
-        for (var li2 = 0; li2 < st.ask.choices.length && li2 < 8; li2++) {
+        for (var li2 = 0; li2 < st.ask.choices.length && li2 < PANEL.MAX_CHOICES; li2++) {
           lines.push('  ' + String(st.ask.choices[li2]))
         }
-        lines.push('(点下面的按钮,或者直接在这里打字回答)')
         st.log = [{ who: 'dsh', text: lines.join('\n'), at: Date.now() }]
         renderLog()
         // 选项出现/消失会改行数 ⇒ 需要重建面板。
@@ -549,49 +494,9 @@ try {
   /* 忽略 */
 }
 
-/* 快捷动作按钮 —— 每个都独立包一层:某一个绑不上,其余照样能用 */
-for (var ci = 0; ci < QUICK_ACTIONS.length; ci++) {
-  try {
-    wQuick[ci].setValueChangeCallback(
-      (function (action) {
-        return function () {
-          quickSend(action)
-        }
-      })(QUICK_ACTIONS[ci])
-    )
-  } catch (e) {
-    /* 忽略 */
-  }
-}
-
-/* 调参控件的回调 —— 每个都独立包 try/catch,一个绑不上不影响其余 */
-/* 一键调参 —— 只发一句话给 DSH,由助手去读工程、判断、再调。
- * ⚠️ 用户 2026-10-02 两次纠正过这个按钮的定位:
- *    ① "不需要预设,不需要我再在下面调参数,我自己要调的话就直接用歌声模块来调了"
- *    ② "这个一键调参的功能应该是前面这些快捷动作的总和"
- *    ⇒ 所以它**不是**"打开一堆滑条",而是"把整条流水线跑一遍"的总开关:
- *      看工程 → 读转录 → 体检 → 量化 → 填歌词 → 调声库参数,该做的都做。
- * ⚠️ 文案里不出现 emoji —— SV2 侧栏字体不渲染,会变乱码。 */
-try {
-  wTuningToggle.setValueChangeCallback(function () {
-    try {
-      quickSend({
-        msg:
-          '一键调参(把整条流水线走一遍,等于前面所有快捷动作的总和):\n'
-          + '① 看工程状况:几条轨、音频轨在哪、当前组是什么、多少音符\n'
-          + '② 读「人声」轨上 SV2 转录出来的音符,做一次布局体检(有没有重叠)\n'
-          + '③ 量化到十六分音符 —— 先给我 dry-run 计划\n'
-          + '④ 按这首歌的风格 + 当前这一组用的声库,把这组的声音属性和 vocal mode 调好\n'
-          + '⑤ 该补的歌词、该加的装饰音,你判断\n'
-          + '每一步都先说要做什么、为什么,再动手;拿不准的先问我。',
-      })
-    } catch (e) {
-      /* 忽略 */
-    }
-  })
-} catch (e) {
-  /* 忽略 */
-}
+/* 快捷动作 / 一键调参的回调在 0.6.0 一并删掉了(用户 2026-10-07:"那些快捷方式可有可无了")。
+ * 想跑"全参"那套流水线,直接在小输入框里说一句"全参"即可 ——
+ * 助手的常驻提示词里本来就写着整套八步流程。 */
 
 /* 选项按钮的回调 —— 点了就把那个选项当成一句话发出去,并清掉选项。
  * ⚠️ 这样用户**不用打字**:点一下就等于回答了。 */
@@ -637,108 +542,66 @@ function getClientInfo() {
   }
 }
 
+/**
+ * 面板版面(2026-10-07 大改后的顺序,**从上到下**):
+ *   ① 状态行(一行,极短)
+ *   ② 回复区(只显示最近一条回复)
+ *   ③ 有选项时:题目 → 选项(竖排、一行一个)→ "不满意?在下面自己写:" 提示
+ *   ④ 小输入框(有选项时更矮)
+ *   ⑤ [发送][刷新][清空]
+ *
+ * ⚠️ 选项**在输入框上面** —— 用户 2026-10-07 明确要求"选项下面加个小输入框"
+ *    (2026-10-02 那版是反的,已按新要求改过来)。
+ * ⚠️ 每行最多 3 个控件;选项一行一个(并排会把字挤窄、被截断)。
+ * ⚠️ 这个函数必须**永不抛错** —— 抛一次就是宿主弹框 + 脚本中断。
+ */
 function getSidePanelSectionState() {
   var rows = []
   try {
-    // ⚠️ 有选择题时**把面板让给题目**(用户 2026-10-07 提醒"侧栏的框挺小的"):
-    //    日志降高、快捷动作与一键调参先收起来 —— 它们答题期间用不上,
-    //    而每一行都在跟选项抢这块很小的侧栏。答完下一拍自动回来。
-    var asking = !!st.ask
+    var asking = !!(st.ask && st.ask.choices && st.ask.choices.length > 0)
     var logHeight = asking ? PANEL.LOG_HEIGHT_ASK : PANEL.LOG_HEIGHT
+    var inputHeight = asking ? PANEL.INPUT_HEIGHT_ASK : PANEL.INPUT_HEIGHT
 
-    // 快捷动作分两行排(一行塞 6 个按钮在侧栏里太挤)。
-    // ⚠️ 按钮文案必须是纯 ASCII?—— 不是。受限的是 **Section 的 name/title**;
-    //    按钮文字用中文没问题(现有"发送给 DSH"一直如此)。
-    var quickRows = []
-    if (!asking) {
-      for (var r = 0; r < QUICK_ACTIONS.length; r += 3) {
-        var cols = []
-        for (var c = r; c < r + 3 && c < QUICK_ACTIONS.length; c++) {
-          cols.push({
-            type: 'Button',
-            text: QUICK_ACTIONS[c].text,
-            value: wQuick[c],
-            width: 1.0,
-          })
-        }
-        quickRows.push({ type: 'Container', columns: cols })
-      }
-    }
+    // ① 状态行
+    rows.push({ type: 'Label', text: statusLine() })
 
-    rows = [
-      { type: 'Label', text: statusLine() },
-    ]
+    // ② 回复区(只读;内容由 renderLog() 维护)
+    rows.push({
+      type: 'Container',
+      columns: [{ type: 'TextArea', value: wLog, height: logHeight, width: 1.0, readOnly: true }],
+    })
 
-    rows.push(
-      {
-        type: 'Container',
-        columns: [
-          { type: 'TextArea', value: wLog, height: logHeight, width: 1.0, readOnly: true },
-        ],
-      },
-      {
-        type: 'Container',
-        columns: [{ type: 'TextArea', value: wInput, height: PANEL.INPUT_HEIGHT, width: 1.0 }],
-      },
-      {
-        type: 'Container',
-        columns: [
-          { type: 'Button', text: '发送给 DSH', value: wSend, width: 2.0 },
-          { type: 'Button', text: '刷新', value: wRefresh, width: 1.0 },
-          { type: 'Button', text: '清空', value: wClear, width: 1.0 },
-        ],
-      }
-    )
-    for (var q = 0; q < quickRows.length; q++) rows.push(quickRows[q])
-
-    /* ── 一键调参 ─────────────────────────────────────────────────────────
-     * ⚠️ 用户 2026-10-02 明确纠正过设计:
-     *    "我说的一键调参是让你自己根据对这首歌的理解来自动调,并且根据我选择的声库
-     *      来调整这个声库的唱法之类的,**不需要预设,不需要我再在下面调参数**,
-     *      我自己要调的话就直接用歌声模块来调了。"
-     *    ⇒ 所以这里**只有一个按钮**,点了就把请求发给 DSH,由**助手**去读工程、
-     *      判断这首歌该怎么唱、再调这一组的声音属性与 vocal mode。
-     *      **不做滑条、不做预设下拉** —— 那是在跟 SV2 自带的歌声面板抢活。
-     */
-    if (!asking) {
-      rows.push({
-        type: 'Container',
-        columns: [
-          {
-            type: 'Button',
-            text: '一键调参(整条流水线跑一遍)',
-            value: wTuningToggle,
-            width: 1.0,
-          },
-        ],
-      })
-    }
-
-    /* ── 选择题(助手推来的)—— 放在**最下面**,竖排 ────────────────────────
-     * ⚠️ 用户 2026-10-02 的三条要求:
-     *   ① "选项应该放下面,不是有用户的输入框吗?" ⇒ 放在**输入框之下**
-     *   ② "选项应该按竖排排放" ⇒ **一行一个**(并排会把文字挤窄、被截断)
-     *   ③ "用户要是不满意你给的选项,应该可以让用户手动输入"
-     *      ⇒ 上面的输入框**始终可用**,不满意就直接打字发 ——
-     *        走的是和点选项**完全相同**的通道(都是 emit('input'))。
-     */
-    if (st.ask) {
-      rows.push({ type: 'Label', text: '— 请选择(也可以直接在上面打字)—' })
-      rows.push({ type: 'Label', text: st.ask.prompt })
-      for (var a = 0; a < st.ask.choices.length && a < 8; a++) {
+    // ③ 选项区:助手推来的选择题 ⇒ 竖排按钮,一行一个
+    if (asking) {
+      rows.push({ type: 'Label', text: '请选择:' + st.ask.prompt })
+      var n = Math.min(st.ask.choices.length, PANEL.MAX_CHOICES)
+      for (var a = 0; a < n; a++) {
         rows.push({
           type: 'Container',
           columns: [
-            {
-              type: 'Button',
-              text: String(st.ask.choices[a]),
-              value: wAsk[a],
-              width: 1.0,
-            },
+            { type: 'Button', text: String(st.ask.choices[a]), value: wAsk[a], width: 1.0 },
           ],
         })
       }
+      // ④ 选项下面就是那个"小输入框"的入口提示
+      rows.push({ type: 'Label', text: '不满意?在下面自己写:' })
     }
+
+    // ⑤ 小输入框(有选项时更矮 —— 把地方让给选项)
+    rows.push({
+      type: 'Container',
+      columns: [{ type: 'TextArea', value: wInput, height: inputHeight, width: 1.0 }],
+    })
+
+    // ⑥ 三个按钮:发送占两份宽(它是最常用的)
+    rows.push({
+      type: 'Container',
+      columns: [
+        { type: 'Button', text: '发送', value: wSend, width: 2.0 },
+        { type: 'Button', text: '刷新', value: wRefresh, width: 1.0 },
+        { type: 'Button', text: '清空', value: wClear, width: 1.0 },
+      ],
+    })
   } catch (e) {
     rows = [{ type: 'Label', text: '面板构建失败(已捕获)' }]
   }
