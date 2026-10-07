@@ -1,7 +1,16 @@
 /**
- * DSH 面板(SidePanelSection)  v0.2.0
+ * DSH 面板(SidePanelSection)  v0.5.0
  * ============================================================================
  * SV2 侧栏里的一个小聊天框:把话发到 DSH,并显示 DSH 那边的回复。
+ *
+ * ⚠️ 侧栏**很窄**(宽度由宿主决定,我们控制不了)⇒ 布局要按"最窄"设计:
+ *    · 每行最多 3 个控件(再多文案就被切);
+ *    · 长文案单独占一行(一键调参);
+ *    · **有选择题时把面板让给题目**:日志降高、快捷动作收起 ——
+ *      整块从 ≈662px 降到 ≈450px,题目与竖排选项不用滚就能看全。
+ *    · 装饰性文字要短(时间戳分隔行从 22 字符降到 7)。
+ *    `tools/panel-tests.mjs` 会**算出**"让所有按钮都不被截断所需的最小宽度"(≈183px)
+ *    并把它钉住 —— 侧栏再窄也还有个可测的下限。
  *
  * ⚠️ 为什么面板不直接读写文件:
  *   面板沙箱**没有任何文件能力**(连 Lua 面板里 `io.open` 都返回 nil)。
@@ -22,11 +31,12 @@
  * ⚠️ 刷新纪律(用户实测过「不要一直刷新,我没法打字」):
  *    `SV.refreshSidePanel()` 会重建整个面板、冲掉输入框焦点。
  *    ⇒ 只有**结构变化**才刷新;纯文本更新走 `WidgetValue.setValue`;
- *      输入框里有没发出去的字时,一律推迟刷新。
+ *      输入框里有没发出去的字时,一律推迟刷新 —— 包括"题目来了"这种结构变化,
+ *      它只挂 `st.askNeedsRefresh`,由轮询那一拍在输入框干净时才真的刷。
  */
 
 var PANEL = {
-  VERSION: '0.4.0',
+  VERSION: '0.5.0',
   K: {
     out: 'svdsh.panel.out', // 面板 → 桥(桥消费后立即删)
     in: 'svdsh.panel.in', // 桥 → 面板(面板消费后立即删)
@@ -35,6 +45,11 @@ var PANEL = {
   // ⚠️ 用户实测反馈:"框太小了,难找到一句话的开头" ⇒ 从 240 提到 460。
   //    现在这个框**只放 DSH 的回复**,所以可以放心做大。
   LOG_HEIGHT: 460,
+  // ⚠️ 但**有选择题的时候必须把它让出来**(用户 2026-10-07 再次提醒"侧栏的框挺小的"):
+  //    题目 + 最多 8 个选项(竖排一行一个,是用户明确要求的)本来就长,再压一个 460 的
+  //    日志框,整个面板就要滚 —— 而在这么窄的侧栏里,"要滚"就等于"看不见、找不到"。
+  //    这时候日志降到只够看题目,高度让给选项;答完(st.ask 清空)下一拍自动涨回去。
+  LOG_HEIGHT_ASK: 170,
   // 用户要在这个框里打字、也要在里面回答我的选择题 ⇒ 从 44 提到 72
   INPUT_HEIGHT: 72,
   LOG_MAX: 20000, // 只截内存里的显示,不落盘
@@ -155,6 +170,9 @@ var st = {
   //    所以助手要决策时不是问一句开放题,而是**推一组按钮**过来点。
   ask: null, // {id, prompt, choices[]} 或 null
   askAt: 0,
+  // 结构变了(题目来 / 选项被点掉)但**还没重建面板**。等输入框干净了再由 step() 刷 ——
+  // 直接刷会冲掉用户正在打的字(文件头第 22-25 行的纪律)。
+  askNeedsRefresh: false,
 }
 
 var outQueue = [] // 面板 → 桥的待发事件(桥还没取走时先攒着,避免互相覆盖)
@@ -259,7 +277,9 @@ function renderLog() {
     var e = st.log[i]
     if (e.who === 'you') continue // 你自己说的话不进这个框
     if (parts.length > 0) parts.push('')
-    parts.push('======== ' + hhmm(e.at) + ' ========')
+    // ⚠️ 分隔行要**短**:侧栏很窄,原来那行 `======== 12:34 ========` 有 22 个字符,
+    //    在这么窄的框里等于白占一整行(用户 2026-10-07 提醒过"框挺小的")。
+    parts.push('[' + hhmm(e.at) + ']')
     parts.push(e.text)
   }
   var text = parts.length
@@ -436,12 +456,11 @@ function pull() {  try {
         lines.push('(点下面的按钮,或者直接在这里打字回答)')
         st.log = [{ who: 'dsh', text: lines.join('\n'), at: Date.now() }]
         renderLog()
-        // 选项出现/消失会改行数 ⇒ 需要重建
-        try {
-          SV.refreshSidePanel()
-        } catch (e4) {
-          /* 忽略 */
-        }
+        // 选项出现/消失会改行数 ⇒ 需要重建面板。
+        // ⚠️ 但**不能在这里直接重建**:用户可能正在输入框里打字,`refreshSidePanel()`
+        //    会连焦点带没发出去的字一起冲掉 —— 这正是文件头第 22-25 行的纪律
+        //    (「不要一直刷新,我没法打字」)。⇒ 交给 step():输入框干净时它才真的刷。
+        st.askNeedsRefresh = true
         return true
       }
       // 不是控制消息 ⇒ 当普通文本继续往下走
@@ -509,6 +528,16 @@ function step() {
     var line = statusLine()
     if (line !== st.lastStatus && !inputDirty()) {
       st.lastStatus = line
+      refresh()
+    }
+  } catch (e) {
+    /* 忽略 */
+  }
+  // 结构变化(来了一道选择题 / 用户点掉了选项)要重建面板 —— 但**只在输入框干净时**。
+  // 用户正在打字就等着,下一拍再看;这样"题目来了"永远不会吃掉没发出去的字。
+  try {
+    if (st.askNeedsRefresh && !inputDirty()) {
+      st.askNeedsRefresh = false
       refresh()
     }
   } catch (e) {
@@ -669,7 +698,8 @@ for (var ai = 0; ai < wAsk.length; ai++) {
             emit('input', { text: pick })
             st.waiting = true
             renderLog()
-            SV.refreshSidePanel()
+            // 同上:选项要消失,但重建面板得等输入框干净(别吃掉用户打的字)
+            st.askNeedsRefresh = true
           } catch (e) {
             /* 忽略 */
           }
@@ -861,21 +891,29 @@ function syncSlidersFromVoice() {
 function getSidePanelSectionState() {
   var rows = []
   try {
+    // ⚠️ 有选择题时**把面板让给题目**(用户 2026-10-07 提醒"侧栏的框挺小的"):
+    //    日志降高、快捷动作与一键调参先收起来 —— 它们答题期间用不上,
+    //    而每一行都在跟选项抢这块很小的侧栏。答完下一拍自动回来。
+    var asking = !!st.ask
+    var logHeight = asking ? PANEL.LOG_HEIGHT_ASK : PANEL.LOG_HEIGHT
+
     // 快捷动作分两行排(一行塞 6 个按钮在侧栏里太挤)。
     // ⚠️ 按钮文案必须是纯 ASCII?—— 不是。受限的是 **Section 的 name/title**;
     //    按钮文字用中文没问题(现有"发送给 DSH"一直如此)。
     var quickRows = []
-    for (var r = 0; r < QUICK_ACTIONS.length; r += 3) {
-      var cols = []
-      for (var c = r; c < r + 3 && c < QUICK_ACTIONS.length; c++) {
-        cols.push({
-          type: 'Button',
-          text: QUICK_ACTIONS[c].text,
-          value: wQuick[c],
-          width: 1.0,
-        })
+    if (!asking) {
+      for (var r = 0; r < QUICK_ACTIONS.length; r += 3) {
+        var cols = []
+        for (var c = r; c < r + 3 && c < QUICK_ACTIONS.length; c++) {
+          cols.push({
+            type: 'Button',
+            text: QUICK_ACTIONS[c].text,
+            value: wQuick[c],
+            width: 1.0,
+          })
+        }
+        quickRows.push({ type: 'Container', columns: cols })
       }
-      quickRows.push({ type: 'Container', columns: cols })
     }
 
     rows = [
@@ -886,7 +924,7 @@ function getSidePanelSectionState() {
       {
         type: 'Container',
         columns: [
-          { type: 'TextArea', value: wLog, height: PANEL.LOG_HEIGHT, width: 1.0, readOnly: true },
+          { type: 'TextArea', value: wLog, height: logHeight, width: 1.0, readOnly: true },
         ],
       },
       {
@@ -913,17 +951,19 @@ function getSidePanelSectionState() {
      *      判断这首歌该怎么唱、再调这一组的声音属性与 vocal mode。
      *      **不做滑条、不做预设下拉** —— 那是在跟 SV2 自带的歌声面板抢活。
      */
-    rows.push({
-      type: 'Container',
-      columns: [
-        {
-          type: 'Button',
-          text: '一键调参(整条流水线跑一遍)',
-          value: wTuningToggle,
-          width: 1.0,
-        },
-      ],
-    })
+    if (!asking) {
+      rows.push({
+        type: 'Container',
+        columns: [
+          {
+            type: 'Button',
+            text: '一键调参(整条流水线跑一遍)',
+            value: wTuningToggle,
+            width: 1.0,
+          },
+        ],
+      })
+    }
 
     /* ── 选择题(助手推来的)—— 放在**最下面**,竖排 ────────────────────────
      * ⚠️ 用户 2026-10-02 的三条要求:

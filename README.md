@@ -125,6 +125,7 @@ node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
 node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,20 条断言)
+node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(34 条断言)
 ```
 
 ---
@@ -215,6 +216,20 @@ caught   dir-candidates-windows-only.lua
 会被误判成"宿主被模态框冻住了" —— 而这两件事的处置完全不同。
 现在"没有心跳就**不下这个结论**"也成了断言。
 
+**面板半边同样有离线测试**(`panel-tests.mjs`,34 条断言):用一个假 SV 把
+`DSHPanel.js` 真的加载起来,调它自己的 `getSidePanelSectionState()` 看交出来的 rows。
+它守的是面板**看不见**的两件事:
+
+- **文字会不会被截断** —— SV2 的侧栏很窄,按钮文案放不下就是被切掉,而"切掉"不报错。
+  测试按最窄的侧栏算每个按钮的可用宽度,并算出**让所有按钮都不被截断所需的最小宽度**
+  (现在 ≈ **183px**,远小于真实侧栏)。
+- **刷新时机** —— `refreshSidePanel()` 会重建面板、冲掉输入框焦点和没发出去的字
+  (用户抱怨过"不要一直刷新,我没法打字")。这类 bug 只有"你正在打字时题目来了"才现形。
+  现在这是断言:题目到达时**只挂待刷新标记**,等输入框干净了再由轮询那一拍去刷。
+
+它还钉住了面板的**自适应**:有选择题时日志框从 460 降到 170、快捷动作与一键调参收起 ——
+整块从 ≈662px 降到 ≈450px,题目与最多 8 个竖排选项在小侧栏里**不用滚**就能看全。
+
 ---
 
 ## 调参标准流程
@@ -268,6 +283,7 @@ tools/               离线测试与工具
   check-file.mjs       编码守卫
   check-client.mjs     浏览器半边守卫(主题 token / 字形 / DOM)
   plugin-tests.mjs     插件半边行为测试(模拟的桥状态)
+  panel-tests.mjs      面板半边离线测试(假 SV:布局 / 最窄宽度 / 刷新纪律)
   analyze-audio.py     BPM / 首拍分析
   analyze-chords.py    和弦分析
   import-musicxml.py   乐谱导入(9 道护栏 + 77 条自测)

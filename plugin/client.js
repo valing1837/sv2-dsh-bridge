@@ -41,6 +41,8 @@ window.__ModuleLoader__.load({
   border-radius: 999px;
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-secondary);
+  /* button 默认不继承字体 —— 不写这行,徽标会用浏览器默认字体,和 DSH 的界面不是一套 */
+  font-family: inherit;
   font-size: 11.5px; line-height: 1; letter-spacing: .01em;
   font-variant-numeric: tabular-nums;
   user-select: none; cursor: pointer;
@@ -82,6 +84,8 @@ window.__ModuleLoader__.load({
   text-align: left; cursor: default; user-select: text;
   z-index: 40;
 }
+/* 上方放不下就朝下开(见组件里的 flip 判断):输入框贴屏幕顶时卡片不该被切掉 */
+.svdb-card[data-flip='true'] { top: calc(100% + 8px); bottom: auto; }
 .svdb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding-bottom: 7px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .svdb-title { font-size: 12px; font-weight: 600; letter-spacing: .01em; }
@@ -107,6 +111,7 @@ window.__ModuleLoader__.load({
   border: 1px solid var(--dsw-alias-border-l1);
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
+  font-family: inherit;
   font-size: 11.5px; line-height: 1; cursor: pointer;
   transition: background-color .15s ease, border-color .15s ease; }
 .svdb-btn:hover { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-border-l2); }
@@ -190,6 +195,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState(null)
       const [failed, setFailed] = useState(false)
       const [open, setOpen] = useState(false)
+      const [flip, setFlip] = useState(false)
       const [stamp, setStamp] = useState(null)
       const rootRef = useRef(null)
       const aliveRef = useRef(true)
@@ -221,6 +227,15 @@ window.__ModuleLoader__.load({
 
       // 打开时立刻刷新一次:卡片里的数字不该是 5 秒前的
       useEffect(() => { if (open) load() }, [open, load])
+
+      // 上方空间不够就朝下开。卡片最高约 320px(六段 + 提示块),留 24px 余量。
+      // 不做这一步的话,输入框贴着窗口顶部时卡片会被切掉一半 —— 而这种时候
+      // 恰恰是用户最需要看它的时候。
+      useEffect(() => {
+        if (!open || !rootRef.current) return
+        const rect = rootRef.current.getBoundingClientRect()
+        setFlip(rect.top < 344)
+      }, [open])
 
       // 点外面 / Esc 关掉。监听器挂在 document 上,但**只在打开期间**存在,卸载即清掉。
       useEffect(() => {
@@ -271,7 +286,12 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'svdb-root', ref: rootRef }, h('style', null, CSS), chip)
       }
 
-      const card = h('div', { className: 'svdb-card', role: 'dialog', 'aria-label': 'SV 桥状态' },
+      const card = h('div', {
+        className: 'svdb-card',
+        role: 'dialog',
+        'aria-label': 'SV 桥状态',
+        'data-flip': flip ? 'true' : 'false',
+      },
         h('div', { className: 'svdb-head' },
           h('span', { className: 'svdb-title' }, 'Synthesizer V 桥'),
           h('span', { className: 'svdb-state' },

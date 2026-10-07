@@ -46,6 +46,10 @@ jobs:
         working-directory: tools
         run: node plugin-tests.mjs
 
+      - name: Panel half (layout / narrow sidebar / refresh discipline)
+        working-directory: tools
+        run: node panel-tests.mjs
+
       - name: Behavioural harness (44 tests)
         working-directory: tools
         run: node harness.mjs
