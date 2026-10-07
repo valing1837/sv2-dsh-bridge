@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
+[![Ops](https://img.shields.io/badge/ops-47-blue.svg)](plugin/sv/DSHBridge.lua)
 [![Tests](https://img.shields.io/badge/tests-47%2F47-brightgreen.svg)](tools/harness.mjs)
 [![Mutants](https://img.shields.io/badge/mutants-68%2F68%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
@@ -30,7 +30,7 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 └──────────────────────────┘                          └──────────────────────────┘
 ```
 
-- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,46 个 op)和 JS(侧栏面板)
+- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,47 个 op)和 JS(侧栏面板)
 - **`plugin/`** —— 跑在 DSH 里的宿主插件(11 个工具 + 常驻提示词 + 输入框下的状态卡)
 
 没有网络通信:两边靠**固定文件名的轮询**交换 JSONL。
@@ -40,7 +40,7 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 
 ## 能做什么
 
-46 个 op,按用途分组:
+47 个 op,按用途分组:
 
 | 类别 | op |
 |---|---|

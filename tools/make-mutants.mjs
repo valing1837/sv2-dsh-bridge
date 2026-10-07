@@ -501,6 +501,20 @@ end`]]],
     'restore: capture the attribute layer but never write it back (the read-back then reports a mismatch, or worse, is not compared at all)',
     [['    if want.attrs ~= nil and nt ~= nil then applyAttrs(nt, want.attrs) end',
       '    if false then applyAttrs(nt, want.attrs) end   -- MUTANT: 不写回属性']]],
+
+  // ---- 0.9.4:auto_pitch(音高微表情)------------------------------------------
+
+  // 句尾不下滑 ⇒ 唱出来是"硬收",人味没了。
+  ['auto-pitch-no-fall',
+    'auto_pitch: 句尾不下滑(每个乐句都硬收,听起来不像人唱的)',
+    [['        push(endQ - lead, 0)      -- 先回 0,形状才成立(不是从上一个音一路滑下来)\n        push(endQ - 0.03, -fallMax)',
+      '        push(endQ - lead, 0)\n        push(endQ - 0.03, 0)   -- MUTANT: 句尾不落']]],
+
+  // 滑入方向反了 ⇒ 往上跳时从上方"砸"下来,听感立刻不对。
+  ['auto-pitch-wrong-slide-side',
+    'auto_pitch: 大跳滑入的方向搞反(往上跳反而从上方滑入)',
+    [['        local dir = (leap > 0) and -1 or 1',
+      '        local dir = (leap > 0) and 1 or -1   -- MUTANT: 方向反了']]],
 ]
 
 function apply(src, subs, name) {

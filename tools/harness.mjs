@@ -114,6 +114,7 @@ const TESTS = [
   ['44', 'snapshot + restore: the group-level layout'],
   ['45', 'voice layer: merge / clearModes / resetModes'],
   ['46', 'panel relay: the direct-op whitelist'],
+  ['47', 'auto_pitch: 音高微表情(句尾下滑 / 大跳滑入 / 长音下坠)'],
 ]
 
 const results = new Map()
@@ -3050,6 +3051,78 @@ function documentLimitations() {
 // runner
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// test 47 — auto_pitch:音高微表情(相对 pitchDelta,不动音符)
+// ---------------------------------------------------------------------------
+// 用户 2026-10-07:"人唱歌是动态的……音高曲线你也应该用上。"
+// 关键性质:**相对**音分偏移(pitchDelta)⇒ 加在音符音高之上,**不替代**它。
+// 这个测试钉住三件事:三种情形各被认出来 · 值是"小偏移"而不是音高本身 · 音符层一点没动。
+function testAutoPitch() {
+  const c = checks()
+  resetWorld()
+  // ⚠️ 规则用**合成数据**测(喂"拍",不经过宿主)。为什么:
+  //    ① 这三条规则只跟"拍"和"音高"有关,喂拍最准;
+  //    ② 假宿主在 >2³¹ 的整数上会 **32 位截断**(实测 5 拍 × 705600000 ⇒ −1.087 拍),
+  //       想用真实布点摆出"空隙 / 长音"就摆不出来 ✗。
+  const plan = (notes, opts) =>
+    JSON.parse(callGlobal(L, '__T_pitchPlan', [JSON.stringify(notes), JSON.stringify(opts || {})]))
+  const minV = (p) => Math.min(...p.points.map((x) => x.value))
+  const maxV = (p) => Math.max(...p.points.map((x) => x.value))
+
+  // ① 句尾:最后一个音一定算
+  const a = plan([{ at: 0, dur: 1, pitch: 60 }])
+  c.eq('(a) 单音 ⇒ 算句尾', a.stat.fall, 1)
+  c.ok('(a) 句尾是**负**偏移(往下落)', minV(a) < 0, a.points)
+  c.eq('(a) 单音不触发下坠/滑入', `${a.stat.drift},${a.stat.slide}`, '0,0')
+
+  // ② 空隙 ≥1 拍 ⇒ 前一个音也算句尾
+  const b1 = plan([{ at: 0, dur: 1, pitch: 60 }, { at: 2, dur: 1, pitch: 62 }])
+  c.eq('(b) 空隙 1 拍 ⇒ 两个音都算句尾', b1.stat.fall, 2)
+  const b2 = plan([{ at: 0, dur: 1, pitch: 60 }, { at: 1.5, dur: 1, pitch: 62 }])
+  c.eq('(b) 空隙 0.5 拍 ⇒ 只有最后一个音算句尾', b2.stat.fall, 1)
+
+  // ③ 大跳(≥4 半音)⇒ 从对侧滑入
+  const s1 = plan([{ at: 0, dur: 1, pitch: 60 }, { at: 1, dur: 1, pitch: 64 }])
+  c.eq('(c) +4 半音 ⇒ 一处滑入', s1.stat.slide, 1)
+  c.ok('(c) 往上跳 ⇒ 从**下方**滑入(负偏移)', minV(s1) < 0, s1.points)
+  const s2 = plan([{ at: 0, dur: 1, pitch: 64 }, { at: 1, dur: 1, pitch: 60 }])
+  c.eq('(c) −4 半音 ⇒ 也算滑入', s2.stat.slide, 1)
+  c.ok('(c) 往下跳 ⇒ 从**上方**滑入(正偏移)', maxV(s2) > 0, s2.points)
+  const s3 = plan([{ at: 0, dur: 1, pitch: 60 }, { at: 1, dur: 1, pitch: 63 }])
+  c.eq('(c) +3 半音 ⇒ 不算大跳', s3.stat.slide, 0)
+
+  // ④ 长音(≥2 拍)且与下一个音相连 ⇒ 轻微下坠
+  const d1 = plan([{ at: 0, dur: 2, pitch: 60 }, { at: 2, dur: 1, pitch: 60 }])
+  c.eq('(d) 2 拍长音 + 相连 ⇒ 下坠', d1.stat.drift, 1)
+  const d2 = plan([{ at: 0, dur: 1.5, pitch: 60 }, { at: 1.5, dur: 1, pitch: 60 }])
+  c.eq('(d) 1.5 拍 ⇒ 不算长音', d2.stat.drift, 0)
+
+  // ⑤ 句尾优先于下坠(两者互斥)
+  const e1 = plan([{ at: 0, dur: 3, pitch: 60 }, { at: 5, dur: 1, pitch: 60 }])
+  c.eq('(e) 长音但后面有空隙 ⇒ 算句尾、不算下坠',
+    `${e1.stat.fall},${e1.stat.drift}`, '2,0')
+
+  // ⑥ 幅度可缩放,且都在"小偏移"量级
+  const f1 = plan([{ at: 0, dur: 1, pitch: 60 }], { fallMax: 60, scale: 0.5 })
+  c.eq('(f) scale 0.5 ⇒ 幅度减半', minV(f1), -30)
+  c.ok('(g) 所有点都在 ±200 音分以内(是微表情,不是改音高)',
+    e1.points.every((p) => Math.abs(p.value) <= 200), e1.points)
+  c.ok('(g) 曲线按时间升序(宿主按顺序插点)', e1.points.every((p, i, arr) => i === 0 || arr[i - 1].at <= p.at), e1.points)
+
+  // ⑧ 经宿主的真跑一次:只查"不动音符 + 曲线进组"(规则已在上面的纯函数里钉住)
+  resetWorld()
+  const beforeNotes = () => groupsOf().map((g) => JSON.stringify(notesOf(g))).join('|')
+  const before = beforeNotes()
+  const w = req('auto_pitch', { dryRun: false })
+  c.eq('(h) 经宿主写入 ok', w.ok, true)
+  c.eq('(h) 首尾自动闭合', w.result && w.result.closedShape, true)
+  c.eq('(h) ⚠️ **音符层一点没动**(pitchDelta 是相对偏移,不替代音高)',
+    beforeNotes(), before)
+  c.ok('(h) pitchDelta 曲线确实进了组', JSON.stringify(groupsOf()).includes('pitchDelta'))
+  c.done('47', TESTS[47][1])
+}
+
+// ---------------------------------------------------------------------------
 const PLAN = [
   ['0', testSyntax],
   ['1', () => callGlobal(L, '__T1')],
@@ -3098,6 +3171,7 @@ const PLAN = [
   ['44', testSnapshotLayout],
   ['45', testVoiceLayer],
   ['46', testPanelRelay],
+  ['47', testAutoPitch],
 ]
 
 function main() {
