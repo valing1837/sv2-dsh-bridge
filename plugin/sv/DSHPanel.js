@@ -60,17 +60,6 @@ var PANEL = {
   STATUS_MS: 20000,
 }
 
-// 调参面板要控的参数(与桥的 set_voice 一一对应)
-var VOICE_PARAMS = [
-  { key: 'loudness', label: '响度', min: -48, max: 12, interval: 0.5, fmt: '%4.1f dB' },
-  { key: 'tension', label: '张力', min: -1, max: 1, interval: 0.05, fmt: '%4.2f' },
-  { key: 'breathiness', label: '气声', min: -1, max: 1, interval: 0.05, fmt: '%4.2f' },
-  { key: 'gender', label: '性别', min: -1, max: 1, interval: 0.05, fmt: '%4.2f' },
-  { key: 'toneShift', label: '音区', min: -800, max: 800, interval: 10, fmt: '%5.0f ct' },
-]
-var MODE_KEYS = ['pitch', 'timbre', 'pronunciation']
-var MODE_LABELS = { pitch: '音高', timbre: '音色', pronunciation: '咬字' }
-
 var wLog = SV.create('WidgetValue')
 var wInput = SV.create('WidgetValue')
 var wSend = SV.create('WidgetValue')
@@ -125,23 +114,26 @@ for (var qi = 0; qi < QUICK_ACTIONS.length; qi++) {
   wQuick.push(SV.create('WidgetValue'))
 }
 
-/* ── 调参控件 ─────────────────────────────────────────────────────────────
- * 为什么放在面板里、而且**直连桥**(不经过 DSH):
- *   拖滑条要"松手就生效"。绕一趟 DSH(经过模型)既慢,又会把聊天记录刷满。
- *   桥那边只对白名单 op 开放这条通路(见 DSHBridge.lua 的 PANEL_OP_OK)。
+/* ── 控件 ─────────────────────────────────────────────────────────────────
+ * ⚠️ 0.8.5 删掉了原来那套"调参滑条 + 预设下拉"(VOICE_PARAMS / wTuningRead /
+ *    wTuningApply / wTuningReset / wPresetCombo / wVoiceParams / readVoice /
+ *    applyVoice / rebuildModeWidgets / syncSlidersFromVoice / onOpResult /
+ *    sendOp,以及 st 里的 voice / presets / modeWidgets / opSeq / opWait /
+ *    voiceMsg / groupLabel)。
+ *
+ *    为什么删:用户 2026-10-02 裁定"不要滑条、不要预设"(见下面「一键调参」那段),
+ *    之后 getSidePanelSectionState() 就**再也没有渲染过那些控件** ⇒ 回调永远不会触发
+ *    ⇒ 整条链子是死代码。而死代码既没有测试、也没有真机路径,留着只会让人以为
+ *    "面板能直接调参"。
+ *
+ *    ⚠️ 桥那边的能力**保留**:面板直连 op 的白名单(`DSHBridge.lua` 的 PANEL_OP_OK)
+ *       与中继协议仍在,并且现在有测试守着(harness 的「面板中继」一条)。
+ *       将来要加回什么控件,直接 emit({kind:'op', op:'get_voice', ...}) 即可。
  */
 var wTuningToggle = SV.create('WidgetValue')
 // 选项按钮:预建 8 个复用(控件数量固定,就不用为了选项反复重建面板)
 var wAsk = []
 for (var wa = 0; wa < 8; wa++) wAsk.push(SV.create('WidgetValue'))
-var wTuningRead = SV.create('WidgetValue')
-var wTuningApply = SV.create('WidgetValue')
-var wTuningReset = SV.create('WidgetValue')
-var wPresetCombo = SV.create('WidgetValue')
-var wVoiceParams = []
-for (var vp = 0; vp < VOICE_PARAMS.length; vp++) {
-  wVoiceParams.push(SV.create('WidgetValue'))
-}
 
 var st = {
   // ★ 只在内存里,重载即清空。
@@ -156,15 +148,6 @@ var st = {
   pingSentAt: 0, // 发过 ping 但还没收到应答的时刻(0 = 没有在等)
   lastPingAt: 0, // 上次发 ping 的时刻
   lastStatus: '',
-  // ── 调参 ──
-  tuning: false, // 调参区是否展开
-  voice: null, // 最近一次 get_voice 的结果
-  voiceMsg: '', // 调参区的一行状态
-  presets: [], // 扁平化的 "声库/预设" 列表
-  modeWidgets: [], // [{name, w:{pitch,timbre,pronunciation}}]
-  opSeq: 0,
-  opWait: {}, // reqId → 干什么用的(回来时好写日志)
-  groupLabel: '', // 当前组名(调参区标题用)
   // ── 选项(助手推过来的选择题)──
   // ⚠️ 用户 2026-10-02:"在 sv2 作业时,为了追求效率,大多数情况下应该给选项让用户选择"。
   //    所以助手要决策时不是问一句开放题,而是**推一组按钮**过来点。
@@ -371,22 +354,6 @@ function send() {
 }
 
 /**
- * 直连桥的一个 op(白名单在桥那边)。**不经过 DSH** —— 调参要即时生效。
- * 结果由 pull() 收到 {"ctl":"opResult"} 时处理。
- */
-function sendOp(op, args, why) {
-  try {
-    st.opSeq = st.opSeq + 1
-    var reqId = st.opSeq
-    st.opWait[reqId] = why || op
-    emit('op', { op: op, args: args || {}, reqId: reqId })
-    return reqId
-  } catch (e) {
-    return 0
-  }
-}
-
-/**
  * 快捷动作:把一段固定的话塞进输入框再走正常的发送通道。
  * `appendInput` 为真时保留用户已经打好的内容(例如"填歌词"要带上歌词正文)。
  * ⚠️ 面板回调里**绝不抛错** —— 抛一次就是弹框 + 脚本中断。
@@ -426,15 +393,7 @@ function pull() {  try {
         // 所以只能由桥来通知)
         st.log = []
         st.waiting = false
-        st.voice = null
-        st.modeWidgets = []
-        st.voiceMsg = ''
         renderLog()
-        return true
-      }
-      if (ctl && ctl.ctl === 'opResult') {
-        // 面板直连 op 的回执(不写进聊天记录,只更新调参区)
-        onOpResult(ctl)
         return true
       }
       if (ctl && ctl.ctl === 'ask') {
@@ -634,54 +593,6 @@ try {
   /* 忽略 */
 }
 
-try {
-  wTuningRead.setValueChangeCallback(function () {
-    try {
-      readVoice()
-    } catch (e) {
-      /* 忽略 */
-    }
-  })
-} catch (e) {
-  /* 忽略 */
-}
-
-try {
-  wTuningApply.setValueChangeCallback(function () {
-    try {
-      applyVoice()
-    } catch (e) {
-      /* 忽略 */
-    }
-  })
-} catch (e) {
-  /* 忽略 */
-}
-
-try {
-  wTuningReset.setValueChangeCallback(function () {
-    try {
-      // 复位成中性值(只改控件,**不写工程**;要写还得点「应用」)
-      for (var i = 0; i < VOICE_PARAMS.length; i++) wVoiceParams[i].setValue(0)
-      for (var m = 0; m < st.modeWidgets.length; m++) {
-        for (var k = 0; k < MODE_KEYS.length; k++) {
-          st.modeWidgets[m].w[MODE_KEYS[k]].setValue(100)
-        }
-      }
-      try {
-        wPresetCombo.setValue(0)
-      } catch (e2) {
-        /* 忽略 */
-      }
-      st.voiceMsg = '已复位成中性值(还没写进工程 —— 点「应用」才写)'
-    } catch (e) {
-      /* 忽略 */
-    }
-  })
-} catch (e) {
-  /* 忽略 */
-}
-
 /* 选项按钮的回调 —— 点了就把那个选项当成一句话发出去,并清掉选项。
  * ⚠️ 这样用户**不用打字**:点一下就等于回答了。 */
 for (var ai = 0; ai < wAsk.length; ai++) {
@@ -726,168 +637,6 @@ function getClientInfo() {
   }
 }
 
-/* ── 调参 ─────────────────────────────────────────────────────────────────
- * 走**直连桥**那条通路(桥的 PANEL_OP_OK 白名单),不经过 DSH —— 拖完松手就生效。
- *
- * 能控的东西:
- *   · 组级声音属性:响度 / 张力 / 气声 / 性别 / 音区偏移
- *   · 该声库的**每个 vocal mode** 的 音高 / 音色 / 咬字
- *   · 从 voice-presets.json 里按名字套预设
- * ⚠️ 声库(歌手)本身**换不了** —— 脚本 API 里没有 Voice 类,那只能在 SV2 界面里选。
- */
-
-/** 把 voice-presets 的结果拍平成 ComboBox 的选项;第 0 项固定是"不用预设" */
-function flattenPresets(res) {
-  var out = ['(不用预设,用下面的滑条)']
-  try {
-    if (res && res.voices) {
-      for (var i = 0; i < res.voices.length; i++) {
-        var v = res.voices[i]
-        var ps = v.presets || []
-        for (var j = 0; j < ps.length; j++) out.push(v.voice + '/' + ps[j].name)
-      }
-    }
-  } catch (e) {
-    /* 忽略 */
-  }
-  return out
-}
-
-function readVoice() {
-  st.voiceMsg = '读取中…'
-  sendOp('get_voice', {}, 'get_voice')
-  sendOp('list_voice_presets', {}, 'presets')
-}
-
-/**
- * 按读到的声音模式**重建滑条**。
- * ⚠️ 必须在 getSidePanelSectionState **之外**建控件,建完再 SV.refreshSidePanel() ——
- *    在 state 函数里建会自己递归。
- */
-function rebuildModeWidgets() {
-  st.modeWidgets = []
-  try {
-    if (!st.voice || !st.voice.vocalModes) return
-    for (var name in st.voice.vocalModes) {
-      if (!Object.prototype.hasOwnProperty.call(st.voice.vocalModes, name)) continue
-      var m = st.voice.vocalModes[name] || {}
-      var trio = {}
-      for (var k = 0; k < MODE_KEYS.length; k++) {
-        var key = MODE_KEYS[k]
-        var w = SV.create('WidgetValue')
-        w.setValue(typeof m[key] === 'number' ? m[key] : 100)
-        trio[key] = w
-      }
-      st.modeWidgets.push({ name: name, w: trio })
-    }
-    st.modeWidgets.sort(function (a, b) {
-      return a.name < b.name ? -1 : 1
-    })
-  } catch (e) {
-    /* 忽略 */
-  }
-}
-
-/** 面板直连 op 的回执(从 pull() 里来) */
-function onOpResult(ctl) {
-  try {
-    var why = st.opWait[ctl.reqId]
-    delete st.opWait[ctl.reqId]
-    if (ctl.ok !== true) {
-      st.voiceMsg = '出错:' + String(ctl.error || '?')
-      return
-    }
-    var r = ctl.result || {}
-    if (why === 'get_voice') {
-      st.voice = r
-      st.groupLabel = String(r.groupName || '')
-      rebuildModeWidgets()
-      st.voiceMsg = '已读取'
-      // 控件数量变了(vocal mode 可能增减)⇒ 必须重建面板
-      try {
-        SV.refreshSidePanel()
-      } catch (e2) {
-        /* 忽略 */
-      }
-    } else if (why === 'presets') {
-      var before = st.presets.length
-      st.presets = flattenPresets(r)
-      st.voiceMsg = st.voice ? '已读取' : '读到 ' + (st.presets.length - 1) + ' 个预设'
-      // 预设列表是**控件**(ComboBox),数量变了就得重建面板才会出现
-      if (st.presets.length !== before) {
-        try {
-          SV.refreshSidePanel()
-        } catch (e3) {
-          /* 忽略 */
-        }
-      }
-    } else if (why === 'set_voice') {
-      st.voice = r.readBack || st.voice
-      st.voiceMsg = '已应用'
-    }
-  } catch (e) {
-    /* 忽略 */
-  }
-}
-
-function applyVoice() {
-  var args = { vocalModes: {} }
-  var pi = 0
-  try {
-    pi = wPresetCombo.getValue()
-  } catch (e) {
-    pi = 0
-  }
-  if (pi > 0 && st.presets[pi]) {
-    // 选了预设 ⇒ 只发预设。桥那边 preset 会盖过数值,两个一起发没有意义。
-    args.preset = st.presets[pi]
-  } else {
-    for (var i = 0; i < VOICE_PARAMS.length; i++) {
-      try {
-        args[VOICE_PARAMS[i].key] = wVoiceParams[i].getValue()
-      } catch (e2) {
-        /* 忽略 */
-      }
-    }
-    for (var m = 0; m < st.modeWidgets.length; m++) {
-      var item = st.modeWidgets[m]
-      var one = {}
-      for (var k = 0; k < MODE_KEYS.length; k++) {
-        try {
-          one[MODE_KEYS[k]] = item.w[MODE_KEYS[k]].getValue()
-        } catch (e3) {
-          /* 忽略 */
-        }
-      }
-      args.vocalModes[item.name] = one
-    }
-  }
-  st.voiceMsg = '应用中…'
-  sendOp('set_voice', args, 'set_voice')
-}
-
-/** 把读到的值灌回滑条(不重建控件,所以不用刷新面板) */
-function syncSlidersFromVoice() {
-  try {
-    if (!st.voice) return
-    for (var i = 0; i < VOICE_PARAMS.length; i++) {
-      var v = st.voice[VOICE_PARAMS[i].key]
-      if (typeof v === 'number') wVoiceParams[i].setValue(v)
-    }
-    for (var m = 0; m < st.modeWidgets.length; m++) {
-      var item = st.modeWidgets[m]
-      var src = (st.voice.vocalModes || {})[item.name] || {}
-      for (var k = 0; k < MODE_KEYS.length; k++) {
-        var key = MODE_KEYS[k]
-        if (typeof src[key] === 'number') item.w[key].setValue(src[key])
-      }
-    }
-  } catch (e) {
-    /* 忽略 */
-  }
-}
-
-/** ⚠️ 必须永不抛错 */
 function getSidePanelSectionState() {
   var rows = []
   try {

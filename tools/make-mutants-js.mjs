@@ -128,6 +128,18 @@ function main() {
       process.exit(2)
     }
   }
+
+  // ⚠️ 和桥那套一样:替换串都按 "\n" 写,文件一旦是 CRLF 就会**整片**"匹配 0 次"。
+  //    工作树被 Git 的换行转换改过(或某个工具顺手写成了 CRLF)时,先把原因说出来。
+  for (const [file, p] of Object.entries(SRC)) {
+    if (fs.readFileSync(p, 'utf8').includes('\r\n')) {
+      console.error(`✗ ${file}(${p})是 CRLF —— 替换串都按 "\\n" 写,会整片匹配不上。`)
+      console.error('  仓库根目录的 .gitattributes 强制 eol=lf;已有的工作树请重新 checkout,')
+      console.error('  或者用只写 LF 的方式重写该文件(别用 PowerShell 的 WriteAllLines)。')
+      process.exit(2)
+    }
+  }
+
   if (!listOnly) {
     fs.rmSync(OUT_DIR, { recursive: true, force: true })
     fs.mkdirSync(OUT_DIR, { recursive: true })

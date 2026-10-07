@@ -10,9 +10,44 @@
 ### 计划中
 - **`auto_expression` 的风格包** —— 现在规则硬编码,舞曲和抒情只能用同一个系数缩放。
 - **属性层的回滚** —— 快照现在覆盖音符层 + 编排布局;音素 / detune / attributes 还没有回滚点。
-- **面板里的调参控件是死代码** —— 用户 2026-10-02 裁定"不要滑条、不要预设"之后,
-  `VOICE_PARAMS` / `readVoice` / `applyVoice` / `rebuildModeWidgets` 已经没有任何入口
-  渲染它们了。留着是为了"万一要回来",但它现在既没测试也没真机路径 —— 该清或该补。
+
+---
+
+## [0.8.5] — 2026-10-07
+
+### 变更
+- **删掉面板里那条已经死掉的调参链路**(1012 → 721 行)。用户 2026-10-02 裁定
+  "不要滑条、不要预设"之后,`getSidePanelSectionState()` 就**再也没有渲染过那些控件**
+  ⇒ 回调永远不会触发 ⇒ 整条链子是死代码:`VOICE_PARAMS` / `MODE_KEYS` / `MODE_LABELS` /
+  `wTuningRead` / `wTuningApply` / `wTuningReset` / `wPresetCombo` / `wVoiceParams` /
+  `readVoice` / `applyVoice` / `rebuildModeWidgets` / `syncSlidersFromVoice` /
+  `flattenPresets` / `onOpResult` / `sendOp`,以及 `st` 里的
+  `voice` / `presets` / `modeWidgets` / `opSeq` / `opWait` / `voiceMsg` / `groupLabel`。
+  死代码既没有测试也没有真机路径,留着只会让人以为"面板能直接调参"。
+  代码里留了一段注释写明删了什么、为什么删,以及**怎么加回来**。
+
+  ⚠️ **桥那边的能力保留**:面板直连 op 的白名单(`DSHBridge.lua` 的 `PANEL_OP_OK`)
+  与中继协议仍在,而且现在**有测试守着**(见下)。将来要加回什么控件,
+  直接 `emit({kind:'op', op:'get_voice', ...})` 即可。
+
+### 测试
+- 46 → **47 条行为测试**:新增「面板中继:直连 op 的白名单」,20 条断言。
+  **这条通路以前没有任何测试** —— 而它有一个安全设计:面板**不能**调任意 op,
+  只有一张白名单(只读 + 改本组声音属性),其余一律拒。现在钉住:
+  - 白名单里的只读 op 能跑、`reqId` 原样带回、`ctl` 标记正确;
+  - 白名单里的**写** op 真的写进宿主(`set_voice` 改完回读得到);
+  - 白名单外的 op(`delete_notes`)**必须被拒**,而且**音符一个没少**;
+  - 白名单 ⊆ 真 op(每一条都跑得通 ⇒ "没有这个 op"那条兜底不是空话);
+  - op 内部抛错时回 `ok:false` + 错误原文,桥自己不能崩;
+  - 事件键**取走即删**(静止时 `.svp` 里零残留);
+  - 另一条活路:不是 op/status 的 kind 当聊天文本转发。
+- `make-mutants-js.mjs` 补上**行尾自检**(与桥那套同一个教训):替换串都按 `\n` 写,
+  文件一旦是 CRLF 就会整片"匹配 0 次"。这次就是被它拦下来的 —— 我用 PowerShell 的
+  `WriteAllLines` 改文件,顺手把面板写成了 CRLF,生成器立刻报"两条模式命中 0 次"。
+  现在它会直接说"是 CRLF",而不是让人去猜。
+
+### 修复
+- 无。这一版是清理 + 补测试。
 
 ---
 
