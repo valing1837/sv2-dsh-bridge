@@ -124,7 +124,7 @@ node check-mutants.mjs     # 58 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
-node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,20 条断言)
+node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,31 条断言)
 node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(34 条断言)
 ```
 
@@ -207,7 +207,7 @@ caught   dir-candidates-windows-only.lua
 它错了没人会告诉你 —— 只会在 DSH 里安静地难看。所以把要求写成判据,
 连**"状态卡必须显示能不能回滚 / 卡在哪个 op / 快照失败过没有"**都一起钉住。
 
-**插件半边也有行为测试**(`plugin-tests.mjs`,20 条断言):在 `.harness-run/` 里造一份
+**插件半边也有行为测试**(`plugin-tests.mjs`,31 条断言):在 `.harness-run/` 里造一份
 假的 home 与通道目录,把心跳 / 面包屑 / 快照栈写成**精心构造的那几种状态**,
 再真的去调 `sv_status` / `sv_doctor` / `sv_transpose`,断言输出。
 `check-plugin.mjs` 只验"工具定义合法",不跑业务逻辑 —— 而插件侧最容易错的就是
@@ -215,6 +215,9 @@ caught   dir-candidates-windows-only.lua
 这道测试第一次跑就抓到一个:桥**没在跑**时,盘上残留的 `stage=running` 面包屑
 会被误判成"宿主被模态框冻住了" —— 而这两件事的处置完全不同。
 现在"没有心跳就**不下这个结论**"也成了断言。
+它还管**发给面板的那份文本**:面板的 TextArea 不渲染 markdown,
+所以 `**粗体**` / 反引号 / `##` 要先变回纯文本(在两百多像素宽的框里,
+那些字符既占宽度又是噪音);超过 1200 字则**自述**截断并指路到 DSH。
 
 **面板半边同样有离线测试**(`panel-tests.mjs`,34 条断言):用一个假 SV 把
 `DSHPanel.js` 真的加载起来,调它自己的 `getSidePanelSectionState()` 看交出来的 rows。

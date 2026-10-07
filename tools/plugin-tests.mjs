@@ -151,6 +151,37 @@ check('JSON 里有 snapshots / lastOp / frozen 三件',
   'snapshots' in snap && 'lastOp' in snap && 'frozen' in snap, Object.keys(snap))
 check('非回环来源被 403 挡掉', /loopback only/.test(await ask('10.0.0.7')))
 
+console.log('\n— 发给面板的那份文本:markdown 要变回纯文本(面板不渲染它)')
+const { toPanelText, capPanelText, PANEL_TEXT_MAX } = mod
+check('导出了 toPanelText / capPanelText', typeof toPanelText === 'function' && typeof capPanelText === 'function')
+const md = [
+  '## 结论',
+  '',
+  '**量化会造出 3 处重叠**,所以整批没写。',
+  '',
+  '- 第 50 拍 与 55 拍 冲突',
+  '- 用 `quantize {dryRun:false}` 重来',
+  '',
+  '```lua',
+  'print("hi")',
+  '```',
+].join('\n')
+const plain = toPanelText(md)
+check('去掉粗体星号', !plain.includes('**'), plain.slice(0, 40))
+check('去掉标题号', !/^#/m.test(plain))
+check('去掉行内反引号', !plain.includes('`'))
+check('去掉代码围栏', !plain.includes('```'))
+check('列表符换成省宽度的点', /^· /m.test(plain))
+check('正文一字不少', /量化会造出 3 处重叠/.test(plain) && /print\("hi"\)/.test(plain))
+check('空行不炸开(最多留一个空行)', !/\n{3,}/.test(plain))
+check('纯文本输入原样通过', toPanelText('就一句话。') === '就一句话。')
+const long = '字'.repeat(PANEL_TEXT_MAX + 500)
+const capped = capPanelText(long)
+check('超长回复会截断', capped.length < long.length && capped.length < PANEL_TEXT_MAX + 120)
+check('⚠️ 截断必须自述(说清还剩多少字、去哪儿看)',
+  /还有 500 字/.test(capped) && /DSH/.test(capped), capped.slice(-60))
+check('不超长就不动它', capPanelText('短回复') === '短回复')
+
 console.log('')
 if (failed === 0) {
   console.log('OK: 插件半边行为全部通过')

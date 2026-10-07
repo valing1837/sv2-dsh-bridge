@@ -391,6 +391,42 @@ async function deliverToSession(ctx, sessionId, text) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 把回复压成"窄面板友好"的纯文本。
+ *
+ * 为什么需要:SV2 侧栏那个 TextArea **不渲染 markdown** —— `**粗体**`、`` `代码` ``、
+ * `## 标题` 到了那儿只是一串**多出来的字符**,在两百多像素宽的框里既占宽度又是噪音。
+ * 面板本来就窄(用户 2026-10-07 提醒过"框挺小的"),所以这里先把它变回纯文本。
+ *
+ * ⚠️ 只处理**发给面板的那一份**;DSH 界面里看到的回复原样不动。
+ */
+export function toPanelText(text) {
+  let t = String(text ?? '')
+  t = t.replace(/```[a-zA-Z0-9_+-]*\n?/g, '') // 代码围栏
+  t = t.replace(/`([^`\n]*)`/g, '$1') // 行内代码
+  t = t.replace(/\*\*([^*\n]+)\*\*/g, '$1') // 粗体
+  t = t.replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1$2') // 斜体(别吃掉列表符)
+  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '') // 标题号
+  t = t.replace(/^\s*[-*+]\s+/gm, '· ') // 列表符换成最省宽度的点
+  t = t.replace(/\n{3,}/g, '\n\n')
+  return t.trim()
+}
+
+/** 面板里一屏大概能看多少字(≈236px 宽 × 460px 高)。超了就如实截断并指路。 */
+export const PANEL_TEXT_MAX = 1200
+
+/**
+ * 太长的回复截断 —— 但**绝不静默**:把还剩多少字、去哪儿看写清楚。
+ * 面板是"扫一眼"的地方,完整内容在 DSH 里(面板自己的设计就是这么定的)。
+ */
+export function capPanelText(t, max = PANEL_TEXT_MAX) {
+  const s = String(t ?? '')
+  if (s.length <= max) return s
+  return s.slice(0, max) + `\n…(面板只显示到这里,还有 ${s.length - max} 字 —— 完整回复在 DSH 里看)`
+}
+
+// ---------------------------------------------------------------------------
+
+/**
  * 构建工具清单。
  *
  * 抽成独立函数是为了让 `tools/check-plugin.mjs` 能**离线**拿到同一批定义并校验 schema ——
@@ -1085,7 +1121,8 @@ export function apply(ctx, config) {
       .trim()
     if (text.length === 0) return
 
-    pushToPanel(`DSH: ${text}`)
+    const panelText = capPanelText(toPanelText(text))
+    pushToPanel(`DSH: ${panelText}`)
     state.awaitingReplyFromSv = false
     saveStateNow()
   })
