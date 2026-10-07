@@ -1,0 +1,10 @@
+# 换行:仓库里一律 LF(.editorconfig 也这么要求),**不要**交给每个人的 git config。
+#
+# 为什么必须显式写:Git for Windows 默认 core.autocrlf=true,检出时会把 LF 换成 CRLF。
+# 而 tools/make-mutants.mjs 的替换串全都按 "\n" 写 —— CRLF 工作树下**每一条**都会
+# "pattern matched 0 times",生成器直接 abort,变异门禁连一个变异都跑不到。
+# windows 的 CI job 就是这么红的(实测:24 条模式失配)。
+* text=auto eol=lf
+
+# PowerShell 脚本按 .editorconfig 用 CRLF
+*.ps1 text eol=crlf

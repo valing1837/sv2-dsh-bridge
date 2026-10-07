@@ -164,7 +164,12 @@ DSH ⇄ SV2 桥(常驻 Lua / 文件通道)  v0.1.0
 --            get_automation / set_automation / delete_notes / get_computed。
 --    0.3.0 = 新增 write_notes(在新组里创建音符 + 歌词,三步挂轨)。
 --    0.2.0 = 面板改内存态 + 换工程自动清空 + 去掉周期性写工程数据。
-local BRIDGE_VERSION = "0.7.0"
+--    0.7.1 = **路径分隔符不再写死 "\\"**(sepFor/joinPath)。POSIX 上反斜杠是合法
+--            文件名字符 ⇒ 原来的写法不是报错,而是**静默写错地方**:pickDir 的探测
+--            文件以"名字里带反斜杠"的形式创建成功(桥以为目录可用),boot/hb/lastop
+--            全落进那个错位文件名。CI 的 ubuntu job 就是被这条打红的(实测日志:
+--            got ".../userprofile\.dsh\sv-bridge" / want ".../userprofile/.dsh/sv-bridge")。
+local BRIDGE_VERSION = "0.7.1"
 local PROTOCOL = 1
 
 local CFG = {
@@ -196,8 +201,33 @@ local ST = {
 
 local PATH = {}
 
+-- ⚠️ 分隔符**不能写死 "\\"**:POSIX 上反斜杠是**合法文件名字符**,不是分隔符。
+--    写死的后果不是报错,而是**静默写错地方** —— pickDir 的探测文件会以"名字里带
+--    反斜杠"的形式被成功创建(于是桥以为目录可用),boot / hb / lastop 也全落进那个
+--    错位文件名里,而 DSH 侧在正确的路径上永远读不到任何东西,两端日志各自都正常。
+--    实测代价(CI 的 ubuntu job,日志原文):
+--      got  ".../userprofile\.dsh\sv-bridge"
+--      want ".../userprofile/.dsh/sv-bridge"
+--    判据取 `dir` 自己用的分隔符 —— 它才是对端真正会去找的那个路径;dir 里一个斜杠
+--    都没有时,退回宿主 Lua 自己的分隔符(package.config 第一个字符)。
+local function sepFor(dir)
+  if type(dir) == "string" and #dir > 0 then
+    local last = dir:sub(-1)
+    if last == "/" or last == "\\" then return last end
+    local hasBack = dir:find("\\", 1, true) ~= nil
+    local hasFwd = dir:find("/", 1, true) ~= nil
+    if hasBack and not hasFwd then return "\\" end
+    if hasFwd and not hasBack then return "/" end
+  end
+  local cfg = package and package.config
+  if type(cfg) == "string" and cfg:sub(1, 1) == "/" then return "/" end
+  return "\\"
+end
+
+local function joinPath(dir, name) return dir .. sepFor(dir) .. name end
+
 local function buildPaths(dir)
-  local function p(name) return dir .. "\\" .. name end
+  local function p(name) return joinPath(dir, name) end
   -- ⚠️ 逐字段赋值,不要 `PATH = { ... }` 重新绑定:测试钩子按引用持有这张表,
   --    重新绑定会让它永远看到空表(离线测试台实测过)。
   PATH.dir        = dir
@@ -451,12 +481,14 @@ end
 -- 顺序:① %USERPROFILE%\.dsh\sv-bridge(插件建) ② %TEMP%\dsh-sv-bridge(插件建)
 local function pickDir()
   local cands = {}
+  -- ⚠️ 分隔符跟着**目录自己**走(见 sepFor 的说明):写死 "\\" 在 POSIX 上会让探测
+  --    文件以"名字里带反斜杠"的形式创建成功 ⇒ 桥以为目录可用,然后一路写错地方。
   local up = os.getenv and os.getenv("USERPROFILE")
-  if up and #up > 0 then cands[#cands + 1] = up .. "\\.dsh\\sv-bridge" end
+  if up and #up > 0 then cands[#cands + 1] = joinPath(joinPath(up, ".dsh"), "sv-bridge") end
   local tp = os.getenv and (os.getenv("TEMP") or os.getenv("TMP"))
-  if tp and #tp > 0 then cands[#cands + 1] = tp .. "\\dsh-sv-bridge" end
+  if tp and #tp > 0 then cands[#cands + 1] = joinPath(tp, "dsh-sv-bridge") end
   for _, d in ipairs(cands) do
-    local probe = d .. "\\svdsh-wtest.tmp"
+    local probe = joinPath(d, "svdsh-wtest.tmp")
     local f = io.open(probe, "w")
     if f then
       f:close()
@@ -3940,7 +3972,7 @@ function OPS.get_group_voice(args)
       return { found = false, projectName = name,
                error = "列不出 " .. dirPart .. " 下的 .svp(dir 没返回东西)" }
     end
-    local fullSaved = dirPart .. "\\" .. newestSaved
+    local fullSaved = joinPath(dirPart, newestSaved)
     local f2 = io.open(fullSaved, "rb")
     if f2 == nil then
       return { found = false, projectName = name,
@@ -3968,7 +4000,7 @@ function OPS.get_group_voice(args)
     }
   end
 
-  local path = recDir .. "\\" .. newest
+  local path = joinPath(recDir, newest)
   local f = io.open(path, "rb")
   if f == nil then return { found = false, error = "打不开 " .. path, projectName = name } end
   local text = f:read("*a")
@@ -4880,7 +4912,7 @@ end
 -- 面包屑:被模态框冻住时,能看出是哪个 op 卡住的
 local function writeLastOp(stage, req)
   pcall(function()
-    writeAtomic(PATH.dir .. "\\svdsh-lastop-sv.json", jenc({
+    writeAtomic(joinPath(PATH.dir, "svdsh-lastop-sv.json"), jenc({
       stage = stage, id = req and req.id, op = req and req.op,
       session = ST.session, reqSeen = ST.reqSeen, opsRun = ST.opsRun, ts = os.time(),
     }))
@@ -5069,7 +5101,7 @@ local function fatal(reason, extra)
   -- ⚠️ 只写文件与日志,**绝不弹信息框**(弹框会冻住宿主,而且用户可能看不到)
   pcall(function()
     local dir = ST.dir or (os.getenv and os.getenv("TEMP"))
-    if dir then writeAtomic(dir .. "\\svdsh-boot-sv.json", jenc(payload)) end
+    if dir then writeAtomic(joinPath(dir, "svdsh-boot-sv.json"), jenc(payload)) end
   end)
   log("FATAL: " .. tostring(reason))
 end
@@ -5170,6 +5202,8 @@ if type(SVDSH_TEST) == "table" then
   SVDSH_TEST.writeHeartbeat = writeHeartbeat
   SVDSH_TEST.pickDir = pickDir
   SVDSH_TEST.buildPaths = buildPaths
+  SVDSH_TEST.sepFor = sepFor
+  SVDSH_TEST.joinPath = joinPath
   SVDSH_TEST.CFG = CFG
   SVDSH_TEST.ST = ST
   SVDSH_TEST.PATH = PATH

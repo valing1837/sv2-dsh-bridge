@@ -14,6 +14,35 @@
 
 ---
 
+## [0.7.1] — 2026-10-07
+
+### 修复
+- **路径分隔符不再写死 `\`**(`sepFor` / `joinPath`)。POSIX 上反斜杠是**合法文件名
+  字符**,不是分隔符 —— 所以原来的写法不是报错,而是**静默写错地方**:`pickDir` 的
+  探测文件会以"名字里带反斜杠"的形式创建成功(桥于是以为目录可用),`boot` / `hb` /
+  `lastop` 全落进那个错位文件名,而 DSH 侧在正确路径上永远读不到任何东西。
+  CI 的 ubuntu job 就是被这条打红的(实测日志:
+  `got ".../userprofile\.dsh\sv-bridge"` / `want ".../userprofile/.dsh/sv-bridge"`)。
+  现在按 `dir` 自己用的分隔符拼,并在离线测试台里钉住这条判据(与平台无关)。
+- **windows CI 的变异门禁**:仓库缺 `.gitattributes`,Git for Windows 默认
+  `core.autocrlf=true` 会把检出换成 CRLF,而 `make-mutants.mjs` 的替换串全都按 `\n`
+  写 ⇒ **24 条模式"匹配 0 次"**、生成器 abort、一个变异都跑不到。
+  现在有 `.gitattributes`(`* text=auto eol=lf`),生成器也会在开头直接把
+  "你的工作树是 CRLF"说出来,而不是打 24 行"匹配 0 次"。
+
+### 修复(测试装置自己的洞)
+- `check-mutants.mjs` 把**子进程没跑起来**(`status === null`)当成了"变异被抓到" ——
+  环境一坏它会打印 `N/N 被抓到 ✓` 却一个变异都没跑。现在单独计数并判红。
+- `check-mutants.mjs` 在 `make-mutants` 起不来时只打 `stdout` / `stderr`(都是空的),
+  真正的 `gen.error` 被吞掉;现在会打出来。
+- 新增变异 `path-sep-hardcoded-windows`(把上面那条分隔符 bug 原样打回去),
+  它在两个平台上都必须被抓到。
+
+### 文档
+- README 第 3 步补上 `dsh.profile.bundles` —— 只写 `dependencies` 装上了包但不会挂载。
+
+---
+
 ## [0.7.0] — 2026-10-02
 
 ### 新增

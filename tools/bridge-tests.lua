@@ -227,6 +227,14 @@ function __T_dir() return T.ST.dir end
 -- directory the harness created, and tests 5-12 adopt these paths from here.
 function __T_path(k) return T.PATH[k] end
 
+-- Path separators. The bridge used to hardcode "\\", which is a legal FILENAME
+-- character on POSIX: the paths then became files whose name contains a
+-- backslash, so the bridge silently wrote into the wrong place (the ubuntu CI
+-- job died on exactly that). These two wrappers let test 4 pin the rule on any
+-- platform.
+function __T_sep(dir) return T.sepFor(dir) end
+function __T_join(dir, name) return T.joinPath(dir, name) end
+
 -- force a heartbeat now (bypasses the 16-tick cadence)
 function __T_hb() T.writeHeartbeat() end
 

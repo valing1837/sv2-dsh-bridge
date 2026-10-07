@@ -400,6 +400,14 @@ end`]]],
     'track_ops list: report the group COUNT as noteCount (the "is the topmost track empty?" answer becomes wrong)',
     [['          noteCount = notes,',
       '          noteCount = gcount,   -- MUTANT: group count reported as note count']]],
+
+  // ⚠️ 这条复现的是 0.7.1 修掉的**静默写错地方**那个 bug,而且它在两个平台上都
+  //    会被抓到(不依赖 package.config 的取值):POSIX 上路径会变成"名字里带反斜杠
+  //    的文件",windows 上 joinPath("/a/b", …) 也会拼出带反斜杠的怪路径。
+  ['path-sep-hardcoded-windows',
+    'joinPath: hardcode the "\\\\" separator (POSIX: every path becomes a FILE whose name contains a backslash, so the bridge silently writes into the wrong place)',
+    [['local function joinPath(dir, name) return dir .. sepFor(dir) .. name end',
+      'local function joinPath(dir, name) return dir .. "\\\\" .. name end   -- MUTANT: separator hardcoded to Windows']]],
 ]
 
 function apply(src, subs, name) {
@@ -420,6 +428,19 @@ function main() {
     process.exit(2)
   }
   const src = fs.readFileSync(BRIDGE, 'utf8')
+
+  // ⚠️ 本文件的替换串全都按 "\n" 写:工作树一旦是 CRLF(仓库里没有 .gitattributes
+  //    时,Git for Windows 默认 core.autocrlf=true 就会这样),**每一条**都会
+  //    "pattern matched 0 times",而报错只说"匹配 0 次",完全看不出真正的原因是换行。
+  //    windows 的 CI job 就是这么红的。先判一次,把原因直接说出来。
+  if (src.includes('\r\n')) {
+    console.error('✗ 桥源码是 CRLF —— 工作树被 Git 的换行转换改过。')
+    console.error('  本文件的替换串都按 "\\n" 写,CRLF 下会整片"匹配 0 次"(不是代码真的变了)。')
+    console.error('  新 clone 不会这样:仓库根目录的 .gitattributes 强制 eol=lf。')
+    console.error('  已有的工作树:`git config core.autocrlf false`,然后删掉文件重新 checkout。')
+    process.exit(2)
+  }
+
   fs.rmSync(OUT_DIR, { recursive: true, force: true })
   fs.mkdirSync(OUT_DIR, { recursive: true })
 

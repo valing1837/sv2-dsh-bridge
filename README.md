@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ops](https://img.shields.io/badge/ops-43-blue.svg)](plugin/sv/DSHBridge.lua)
 [![Tests](https://img.shields.io/badge/tests-41%2F41-brightgreen.svg)](tools/harness.mjs)
-[![Mutants](https://img.shields.io/badge/mutants-53%2F53%20caught-brightgreen.svg)](tools/check-mutants.mjs)
+[![Mutants](https://img.shields.io/badge/mutants-54%2F54%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
 ---
 
@@ -83,13 +83,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 
 ### 3. 装进 DeepSeek Harness
 
-把 `plugin/` 作为本地插件加入 profile:
+把 `plugin/` 作为本地插件加入 profile —— **两处都要写**:
 
 ```jsonc
 // ~/.dsh/profiles/<name>/package.json
 {
   "dependencies": {
     "dsh-sv-bridge": "link:C:/path/to/sv2-dsh-bridge/plugin"
+  },
+  "dsh": {
+    "profile": {
+      // ⚠️ 只写 dependencies 不够:bundle 的 patch 只有在它被列进 dsh.profile.bundles
+      //    时才会被应用(profile 的 cordis.yml 第一行就写着这条规则)。
+      //    少了这一行 = 包装上了,但插件没挂载、预设也不会出现。
+      "bundles": ["dsh-sv-bridge"]
+    }
   }
 }
 ```
@@ -102,7 +110,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 cd tools
 npm install
 node harness.mjs           # 41 条行为测试
-node check-mutants.mjs     # 53 个变异,漏一个就红
+node check-mutants.mjs     # 54 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 ```
@@ -154,7 +162,7 @@ node check-plugin.mjs
 [fengari](https://github.com/fengari-lua/fengari)(纯 JS 的 Lua 5.4)执行真的桥代码,
 配一个假宿主(`tools/fake-sv.lua`),不需要开 SV2。
 
-**53 个变异,每个都必须让测试变红。**
+**54 个变异,每个都必须让测试变红。**
 
 一个从没红过的测试套件不是证据。`tools/make-mutants.mjs` 把**真实发生过的 bug**
 打进桥的副本,`check-mutants.mjs` 逐个跑,要求全部被抓到:
@@ -164,7 +172,7 @@ caught   group-move-wrong-index.lua
 caught   split-notes-ascending.lua
 caught   tempo-mark-reads-positionblick.lua
 ...
-53/53 个变异被抓到
+54/54 个变异被抓到
 ✓ 测试套件确实会失败(不是永远绿的摆设)
 ```
 

@@ -278,6 +278,17 @@ function testBoot() {
   c.eq('SVDSH_TEST.PATH.hb (W4)', bpathSoft('hb'), EXPECTED.hb)
   c.eq('SVDSH_TEST.PATH.boot (W4)', bpathSoft('boot'), EXPECTED.boot)
 
+  // ---- 分隔符回归:桥原来把分隔符写死成 "\\",而 POSIX 上反斜杠是**合法文件名
+  //      字符**,不是分隔符 ⇒ 路径变成"名字里带反斜杠的文件",桥静默写错地方。
+  //      CI 的 ubuntu job 就是死在这条上(实测:got ".../userprofile\.dsh\sv-bridge" /
+  //      want ".../userprofile/.dsh/sv-bridge")。下面三条判据与平台无关,
+  //      所以在 windows 的 CI job 上也能守住这个 POSIX 回归。
+  c.eq('sepFor: Windows dir -> backslash', callGlobal(L, '__T_sep', ['C:\\a\\b']), '\\')
+  c.eq('sepFor: POSIX dir -> slash', callGlobal(L, '__T_sep', ['/a/b']), '/')
+  c.eq('sepFor: forward-slash Windows dir -> slash', callGlobal(L, '__T_sep', ['C:/a/b']), '/')
+  c.eq('joinPath: POSIX stays POSIX', callGlobal(L, '__T_join', ['/a/b', 'x.json']), '/a/b/x.json')
+  c.eq('joinPath: Windows stays Windows', callGlobal(L, '__T_join', ['C:\\a\\b', 'x.json']), 'C:\\a\\b\\x.json')
+
   // from here on, tests 5-12 use the bridge's own paths
   resolvePaths()
 

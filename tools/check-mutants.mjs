@@ -22,6 +22,9 @@ const gen = spawnSync(process.execPath, [path.join(here, 'make-mutants.mjs')], {
 })
 if (gen.status !== 0) {
   console.error('make-mutants.mjs 失败:')
+  // ⚠️ 子进程**根本没起来**时(ENOENT/EPERM/沙箱),stdout/stderr 都是空的 ——
+  //    只打那两个会得到一行什么都没有的报错。真正的原因在 gen.error 里。
+  if (gen.error) console.error(`  子进程没跑起来:${gen.error.message}`)
   console.error(gen.stdout || '', gen.stderr || '')
   process.exit(1)
 }
@@ -44,6 +47,7 @@ if (mutants.length === 0) {
 // ② 逐个跑,要求失败
 const escaped = []
 let missed = 0
+let broken = 0
 
 for (const name of mutants) {
   const r = spawnSync(
@@ -51,6 +55,14 @@ for (const name of mutants) {
     [path.join(here, 'harness.mjs'), '--bridge', path.join(mutantsDir, name)],
     { cwd: here, encoding: 'utf8' },
   )
+  // ⚠️ 子进程**没跑起来**时 status 是 null,而 `null !== 0` 会被算成"抓到了" ——
+  //    也就是说环境一坏,这个门禁会打印 "N/N 被抓到 ✓" 却一个变异都没跑。
+  //    没起来 ≠ 抓到,必须单独计数并且判红。
+  if (r.error) {
+    broken += 1
+    console.log(`  ERROR    ${name}   ← 子进程没跑起来:${r.error.message}`)
+    continue
+  }
   const caught = r.status !== 0
   if (caught) {
     escaped.push(name)
@@ -63,6 +75,10 @@ for (const name of mutants) {
 
 console.log('')
 console.log(`${escaped.length}/${mutants.length} 个变异被抓到`)
+if (broken > 0) {
+  console.log(`✗ ${broken} 个变异**根本没跑**(子进程起不来)—— 这次运行不构成证据`)
+  process.exit(1)
+}
 if (missed > 0) {
   console.log(`✗ ${missed} 个漏网 —— 对应的测试是空的,必须补`)
   process.exit(1)
