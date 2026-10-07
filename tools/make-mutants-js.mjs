@@ -128,6 +128,20 @@ export const MUTANTS = [
     'plugin', 'check-file.mjs',
     [["          fullDoc\n            ? `完整版见 ${fullDoc} —— **动手前先读它**。同目录还有 音频转音符.md。要点:`\n            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',",
       "          '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',   // MUTANT: 写死工作区相对路径"]]],
+
+  // ---- 配置夹取(plugin-tests.mjs)------------------------------------------
+  // profile 里那几项配置是裸值。写错类型坏的是**行为**,而报错完全看不出原因。
+  ['plugin-config-nan-passthrough',
+    'plugin: 配置给了非数字也照收 ⇒ NaN 一路传到 setTimeout,每次调用瞬间"超时"且报错看不懂',
+    'plugin', 'plugin-tests.mjs',
+    [['      notes.push(`${key}=${JSON.stringify(cfg[key])} 不是数字 ⇒ 用默认 ${DEFAULTS[key]}`)\n      cfg[key] = DEFAULTS[key]\n      return',
+      '      notes.push(`${key}=${JSON.stringify(cfg[key])} 不是数字`)\n      return   // MUTANT: 不回落到默认']]],
+
+  ['plugin-config-not-clamped',
+    'plugin: 配置超范围也不夹 ⇒ 例如 pollMs=99999 直接把轮询拖死',
+    'plugin', 'plugin-tests.mjs',
+    [['    const fixed = Math.min(max, Math.max(min, Math.trunc(value)))',
+      '    const fixed = value   // MUTANT: 不夹范围']]],
 ]
 
 function apply(src, subs, name) {

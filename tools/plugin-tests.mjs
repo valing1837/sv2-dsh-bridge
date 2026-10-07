@@ -219,6 +219,26 @@ check('提示词里给的是解析后的绝对路径',
 check('提示词里不再有工作区相对的 sv-dsh/docs/ 路径',
   !promptText.includes('sv-dsh/docs/'))
 
+console.log('\n— 配置夹取:sanitizeConfig 不许让一个写错的值变成"行为怪"')
+// 起因:profile 里那几项配置是裸值。最典型的是 timeoutMs 给成 "abc" ⇒ NaN ⇒
+// setTimeout(NaN) 立刻触发 ⇒ 每次调用都"超时",而报错完全看不出原因。
+const { sanitizeConfig } = mod
+check('导出了 sanitizeConfig', typeof sanitizeConfig === 'function')
+const good = sanitizeConfig({ timeoutMs: 500, pollMs: 10 })
+check('正常值原样通过', good.cfg.timeoutMs === 500 && good.cfg.pollMs === 10, good.cfg)
+check('正常值不产生噪音', good.notes.length === 0, good.notes)
+const badCfg = sanitizeConfig({ timeoutMs: 'abc' })
+check('⚠️ 非数字 ⇒ 回落到默认(而不是 NaN)', badCfg.cfg.timeoutMs === 12000, badCfg.cfg.timeoutMs)
+check('并且如实记下原因', /不是数字/.test(badCfg.notes.join(' ')), badCfg.notes)
+const clamped = sanitizeConfig({ pollMs: 99999, maxPending: 0 })
+check('超上限 ⇒ 夹住', clamped.cfg.pollMs === 2000, clamped.cfg.pollMs)
+check('低于下限 ⇒ 夹住', clamped.cfg.maxPending === 1, clamped.cfg.maxPending)
+check('夹取也记下来', /夹到/.test(clamped.notes.join(' ')), clamped.notes)
+const emptyCfg = sanitizeConfig(undefined)
+check('没给配置 ⇒ 全默认', emptyCfg.cfg.timeoutMs === 12000 && emptyCfg.notes.length === 0, emptyCfg.cfg)
+const st0 = val(await call('sv_status'))
+check('sv_status 会报出配置改动(这里是空数组)', Array.isArray(st0.configNotes), st0.configNotes)
+
 console.log('')
 if (failed === 0) {
   console.log('OK: 插件半边行为全部通过')
