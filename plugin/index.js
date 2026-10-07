@@ -74,6 +74,15 @@ const SNAPSHOT_BEFORE = new Set([
   'clear_pit',
   'auto_tone_shift',
   'auto_expression',
+  // 0.8.3 起快照也存**编排布局**(每条轨的引用清单)⇒ 组级操作同样能回滚:
+  //   · write_notes 建出来的组 → 回滚把它从轨上摘掉;
+  //   · group_ops delete 摘掉的引用 → 回滚挂回去(组还在库里);
+  //   · group_ops move 挪到别的轨 → 回滚挪回来;
+  //   · 时间范围 / 时间与音高偏移变了 → 回滚改回去。
+  // ⚠️ `track_ops remove` **不在**名单里:删掉一整条轨(连同它的名字/颜色/混音)回滚不了,
+  //    列进来只会给人"能救"的错觉 —— 那条路靠它自己的守卫。
+  'write_notes',
+  'group_ops',
 ])
 
 const DEFAULTS = {
@@ -664,7 +673,7 @@ export function buildTools(deps) {
   const undoTool = {
     name: 'sv_undo',
     description:
-      'Roll the current Synthesizer V Studio group back to a snapshot. A snapshot is taken AUTOMATICALLY before every note-level write (delete/split/transpose/lyrics/attrs/quantize/pitch curves/ornaments/auto-tune), so this is the safety net for "the write was valid but wrong". With no `id` it restores the most recent snapshot; sv_status lists what is available. Coverage is the note layer only (onset/duration/pitch/lyrics) — NOT the attribute layer, group create/delete, automation curves or voice settings.',
+      'Roll the current Synthesizer V Studio project back to a snapshot. A snapshot is taken AUTOMATICALLY before every note-level or group-level write (delete/split/transpose/lyrics/attrs/quantize/pitch curves/ornaments/auto-tune/write_notes/group_ops), so this is the safety net for "the write was valid but wrong". With no `id` it restores the most recent snapshot; sv_status lists what is available. Coverage: the note layer (onset/duration/pitch/lyrics) of the snapshot\'s group PLUS the arrangement layout (which groups are mounted on which track, their order, time range and offsets — so a created group is unmounted, a deleted one is re-mounted, a moved one comes back). NOT covered: the attribute layer, orphaned data in the group library, automation curves, voice settings, tempo/meter marks.',
     parameters: objectSchema({
       id: {
         type: 'string',
@@ -1057,9 +1066,10 @@ export function apply(ctx, config) {
           '任何写入之前先 sv_notes 拿到 fp,并把同一个 fp 原样作为 expectFp 传回去;',
           '被拒成 STALE_SELECTION 说明用户在宿主里改过工程,重新读一次再写,不要重试同一个 fp。',
           '桥一次只能处理一个请求,不要并发下发;写操作不要"超时就重试"。',
-          '**每个改音符的写操作之前,插件会自动留一份快照**;写错了(写得对但结果不对)用',
-          '**sv_undo** 回到写之前 —— 别急着手动反向改。快照只覆盖音符层(onset/时值/音高/歌词),',
-          '不含属性层、组的增删、自动化曲线和声音属性,别把它当万能撤销。',
+          '**每个改音符/改组的写操作之前,插件会自动留一份快照**;写错了(写得对但结果不对)用',
+          '**sv_undo** 回到写之前 —— 别急着手动反向改。快照覆盖**音符层**(onset/时值/音高/歌词)',
+          '与**编排布局**(哪条轨挂了哪些组、顺序、时间范围与偏移 ⇒ 新建的组会摘掉、删掉的组会挂回来、',
+          '挪走的组会挪回来);不含属性层、组库里的孤儿数据、自动化曲线和声音属性,别把它当万能撤销。',
           '',
           '## SV2 调参标准流程("全参")',
           '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',

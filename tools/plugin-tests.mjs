@@ -145,7 +145,7 @@ check('frozen 归 null —— 面包屑是上次运行的残留,不是证据', s
 check('hint 告诉用户去哪里跑桥', /运行 \[脚本\]/.test(st3.hint), st3.hint)
 const doc2 = val(await call('sv_doctor'))
 check('doctor 的 nextSteps 第一条是"没有心跳文件"',
-  /心跳文件/.test(doc2.nextSteps[0] || ''), doc2.nextSteps)
+  /心跳文件/.test(((doc2.nextSteps || [])[0]) || ''), doc2.nextSteps)
 
 console.log('\n— 状态路由(浏览器半边拿的就是它)')
 const route = routes.find((r) => r.path === '/dsh-sv-bridge/status')

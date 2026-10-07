@@ -111,6 +111,7 @@ const TESTS = [
   ['41', 'dirCandidates: Windows / macOS / empty env'],
   ['42', 'snapshot + restore: edit / delete / split / UUID / corrupt'],
   ['43', 'selftest: the full-chain self check'],
+  ['44', 'snapshot + restore: the group-level layout'],
 ]
 
 const results = new Map()
@@ -2606,6 +2607,108 @@ function testSelftest() {
 }
 
 // ---------------------------------------------------------------------------
+// test 44 — snapshot / restore: the GROUP-level layout
+// ---------------------------------------------------------------------------
+// 0.8.0 的快照只覆盖音符层,于是 `write_notes` 建出来的组、`group_ops delete` 摘掉的引用、
+// `move` 挪到别的轨的组**都回滚不掉**(返回里如实写着"不含组的增删")。0.8.3 把
+// **编排布局**(每条轨的引用清单)也存进快照。这个测试钉住四种变化 + 两条纪律:
+//   新建 → 摘掉 · 删除 → 挂回来(靠组库按 UUID 找回孤儿组)· 移动 → 挪回来 · 几何 → 改回来;
+//   主组**绝不被碰** · 旧版快照要如实说"做不了",不能假装回滚了。
+function testSnapshotLayout() {
+  const c = checks()
+  resetWorld()
+  callGlobal(L, '__T_snapReset')
+
+  // ⚠️ 快照里 refs[i][0] 是**1 起**的轨下标(桥对外的索引是 0 起,这里只是测试装置的表示)
+  const refsOn = (t) => refsOf().filter((r) => r[0] === t + 1)
+  const mainUuid = () => (groupsOf().find((g) => g[0] === 'Main') || [])[1]
+
+  // (a) 快照要带上布局
+  const a = req('snapshot', { label: 'layout' })
+  c.eq('(a) snapshot ok', a.ok, true)
+  c.ok('(a) 记了轨数与引用数', a.result.refCount >= 1 && a.result.trackCount >= 1, a.result)
+  c.ok('(a) covers 写明包含"编排布局"', /编排布局/.test(a.result.covers || ''), a.result.covers)
+  c.ok('(a) notCovered 不再声称"不含组的增删"',
+    !/组的新建与删除/.test(a.result.notCovered || ''), a.result.notCovered)
+
+  // (b) 新建的组:回滚把它从轨上摘掉
+  const b1 = req('write_notes', { notes: [{ onset: 0, duration: 1, pitch: 72 }] })
+  c.eq('(b) write_notes 建了新组', b1.ok, true)
+  c.eq('(b) 轨上现在两个引用', refsOn(0).length, 2)
+  const b2 = req('restore', {})
+  c.eq('(b) restore ok', b2.ok, true)
+  c.eq('(b) 新建的组被摘掉了', refsOn(0).length, 1)
+  c.eq('(b) 报告里 removed=1', b2.result.layout.removed, 1)
+  c.eq('(b) 顺序复原(没有残留)', b2.result.layout.orderRestored, true)
+  c.eq('(b) 主组还在原位', refsOn(0)[0][2], mainUuid())
+
+  // (c) 删掉的组:回滚把引用挂回来(靠**组库**按 UUID 找回那个孤儿组)
+  const c1 = req('write_notes', { notes: [{ onset: 0, duration: 1, pitch: 74 }] })
+  c.ok('(c) 又建了一个组', c1.ok === true, c1.error || JSON.stringify(c1).slice(0, 160))
+  c.ok('(c) 轨上又有了两个引用', refsOn(0).length === 2, JSON.stringify(refsOn(0)))
+  const bUuid = refsOn(0)[1][2]
+  c.ok('(c) 拿到了它的 UUID', typeof bUuid === 'string' && bUuid.length > 0, bUuid)
+  req('snapshot', { label: 'two-groups' })
+  callGlobal(L, '__T_useGroupAt', [2])
+  const c2 = req('group_ops', { action: 'delete' })
+  c.eq('(c) 删除成功', c2.ok, true)
+  c.eq('(c) 轨上只剩主组', refsOn(0).length, 1)
+  const c3 = req('restore', {})
+  c.eq('(c) restore ok', c3.ok, true)
+  c.eq('(c) 引用挂回来了', refsOn(0).length, 2)
+  c.eq('(c) 挂回来的就是原来那个组(UUID 一致)', refsOn(0)[1][2], bUuid)
+  c.eq('(c) 报告里 readded=1', c3.result.layout.readded, 1)
+  c.eq('(c) 没有"找不回来"的', JSON.stringify(c3.result.layout.unrecoverable), '[]')
+  callGlobal(L, '__T_useGroupAt', [1])
+
+  // (d) 挪到别的轨:回滚把它挪回来
+  //     ⚠️ 这条最容易被漏:组还在快照里(不是"多余"),但挂在错的轨上(也不是"缺失")
+  //        ⇒ 只按"UUID 在不在快照里"判的话,谁都不会管它。写这个测试时才发现。
+  const d0 = req('track_ops', { action: 'add', name: 'Harmony' })
+  c.eq('(d) 加了第二条轨', d0.ok, true)
+  req('snapshot', { label: 'before-move' })
+  callGlobal(L, '__T_useGroupAt', [2])
+  const d1 = req('group_ops', { action: 'move', targetTrackIndex: 1 })
+  c.eq('(d) 移动成功', d1.ok, true)
+  c.eq('(d) 轨 0 上只剩一个引用', refsOn(0).length, 1)
+  c.eq('(d) 轨 1 上有了一个', refsOn(1).length, 1)
+  const d2 = req('restore', {})
+  c.eq('(d) restore ok', d2.ok, true)
+  c.eq('(d) 挪回轨 0 了', refsOn(0).length, 2)
+  c.eq('(d) 轨 1 空了', refsOn(1).length, 0)
+  c.eq('(d) 报告里 moved=1', d2.result.layout.moved, 1)
+  callGlobal(L, '__T_useGroupAt', [1])
+
+  // (e) 几何:时间偏移改了要改回来
+  const e0 = refsOn(0)[1][5]
+  callGlobal(L, '__T_useGroupAt', [2])
+  const e1 = req('group_ops', { action: 'offset', timeOffsetQuarter: 3 })
+  c.eq('(e) 改了时间偏移', e1.ok, true)
+  c.ok('(e) 真的变了', refsOn(0)[1][5] !== e0, refsOn(0)[1][5])
+  const e2 = req('restore', {})
+  c.eq('(e) restore ok', e2.ok, true)
+  c.eq('(e) 偏移改回来了', refsOn(0)[1][5], e0)
+  c.ok('(e) 报告里 geometry ≥ 1', e2.result.layout.geometry >= 1, e2.result.layout.geometry)
+  callGlobal(L, '__T_useGroupAt', [1])
+
+  // (f) 主组绝不被碰:从头到尾都在轨 0 的第 0 个位置、仍标记为主组
+  c.eq('(f) 主组引用还在原位', refsOn(0)[0][2], mainUuid())
+  c.eq('(f) 主组标记没变', refsOn(0)[0][7], 1)
+
+  // (g) 旧版快照(没有 layout):如实说"做不了",而不是假装回滚了
+  callGlobal(L, '__T_snapWrite', [JSON.stringify({
+    seq: 1,
+    items: [{ id: 's1', ts: 1, groupUuid: mainUuid(), groupName: 'Main', noteCount: 3, notes: [] }],
+  })])
+  const g = req('restore', {})
+  c.eq('(g) restore ok(音符层照做)', g.ok, true)
+  c.eq('(g) 布局那部分如实标为不可用', g.result.layout.available, false)
+  c.ok('(g) 并且说清了原因', /没有编排布局/.test(g.result.layout.skipped || ''), g.result.layout.skipped)
+
+  c.done('44', TESTS[44][1])
+}
+
+// ---------------------------------------------------------------------------
 // beyond-spec observations (NOT tests): printed as NOTE, never as a failure
 // ---------------------------------------------------------------------------
 
@@ -2779,6 +2882,7 @@ const PLAN = [
   ['41', testDirCandidates],
   ['42', testSnapshotRestore],
   ['43', testSelftest],
+  ['44', testSnapshotLayout],
 ]
 
 function main() {
