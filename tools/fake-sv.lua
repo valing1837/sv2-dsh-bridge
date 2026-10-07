@@ -86,6 +86,8 @@ local QUARTER = 705600000
 -- ===========================================================================
 
 local M = { QUARTER = QUARTER, pending = nil, timerCalls = 0 }
+-- setVoice 的语义开关(见 newGroupRef 里的说明):false = 整体替换,true = 逐字段合并
+M.voiceMerge = false
 
 -- 让 Track:addGroupReference 按需失败(返回 nil)。只有 40 号测试用它,用来压
 -- group_ops move 的"先挂新引用、成功后再删旧引用"这条纪律。
@@ -358,6 +360,12 @@ newGroupRef = function(group, index, main)
     _group = group, _index = index or 0, _main = main == true,
     _onset = 0, _dur = 0, _timeOffset = 0, _pitchOffset = 0, _muted = false,
     _instrumental = false, _parent = nil,
+    -- 组级声音属性的初值(真机上是"没设过"的默认样子)
+    _voice = {
+      paramLoudness = 0, paramTension = 0, paramBreathiness = 0,
+      paramGender = 0, paramToneShift = 0,
+      vocalModeParams = {},
+    },
   }
   function r:getTarget() return self._group end
   function r:setTarget(g) self._group = g end
@@ -386,6 +394,52 @@ newGroupRef = function(group, index, main)
   function r:setTimeOffset(v) self._timeOffset = v end
   function r:getPitchOffset() return self._pitchOffset end
   function r:setPitchOffset(v) self._pitchOffset = v end
+
+  -- ---- 声音属性(getVoice / setVoice)--------------------------------------
+  -- ⚠️ 真机的 `setVoice` 到底是"整体替换"还是"逐字段合并",**官方没说**。
+  --    桥的实现是"读全 → 合并 → 整体写回",正是为了不依赖这个语义。
+  --    这里用一个开关把**两种语义都造得出来**,好让测试钉住"两种情况下都不出错":
+  --      M.voiceMerge = false(默认)= 整体替换:写什么就是什么
+  --      M.voiceMerge = true       = 逐字段合并:没提到的字段保持原样
+  --    真机若是后者,那么"把某个 vocal mode 从对象里去掉"就**清不掉**它 ——
+  --    这正是 set_voice 的 clearModes 必须**回读并如实报告**的原因。
+  function r:getVoice() return self._voice end
+  function r:setVoice(v)
+    if type(v) ~= "table" then return false end
+    local function copyModes(src)
+      local modes = {}
+      if type(src) == "table" then
+        for name, m in pairs(src) do
+          if type(m) == "table" then
+            modes[name] = { pitch = m.pitch, timbre = m.timbre, pronunciation = m.pronunciation }
+          end
+        end
+      end
+      return modes
+    end
+    local copy = {}
+    for k, val in pairs(v) do
+      if k == "vocalModeParams" then copy[k] = copyModes(val) else copy[k] = val end
+    end
+    if M.voiceMerge then
+      local merged = {}
+      for k, val in pairs(self._voice or {}) do merged[k] = val end
+      for k, val in pairs(copy) do
+        if k == "vocalModeParams" then
+          local modes = {}
+          for name, m in pairs(merged.vocalModeParams or {}) do modes[name] = m end
+          for name, m in pairs(val) do modes[name] = m end
+          merged.vocalModeParams = modes
+        else
+          merged[k] = val
+        end
+      end
+      self._voice = merged
+    else
+      self._voice = copy
+    end
+    return true
+  end
   return r
 end
 
@@ -788,6 +842,7 @@ function M.resetWorld()
   M.computedReady = true
   M.lastComputedPitch = nil
   M.failAddGroupReference = false
+  M.voiceMerge = false
   return true
 end
 
@@ -896,6 +951,8 @@ function M.pitches()
 end
 
 function M.setPitchDirect(i, v) M.notes[i]:setPitch(v) end
+-- setVoice 的语义开关:true = 逐字段合并(真机可能是这样),false = 整体替换
+function M.setVoiceMerge(v) M.voiceMerge = (v == true) end
 function M.pitch(i) return M.notes[i]:getPitch() end
 
 -- select a subset (or all) of the notes

@@ -3523,6 +3523,10 @@ local VOICE_RANGES = {
 }
 local VOCAL_MODE_KEYS = { "pitch", "timbre", "pronunciation" }
 local VOCAL_MODE_RANGE = { min = 0, max = 150 }
+-- "中性值":vocal mode 的默认档。`resetModes` 把三个值都拨到这儿 ——
+-- 它不依赖"setVoice 是替换还是合并"这个未定义语义,所以**一定生效**
+-- (真机上体现为"这个模式不起作用了")。100 是 SV2 面板上的默认位置。
+local VOCAL_MODE_NEUTRAL = 100
 
 -- voice-presets.json 的位置(官方文档没说,是实测的路径;找不到就如实报)
 local function voicePresetsPath()
@@ -3589,6 +3593,8 @@ end
 --
 -- args: { loudness?, tension?, breathiness?, gender?, toneShift?,
 --         vocalModes = { <模式名> = { pitch?, timbre?, pronunciation? } },
+--         clearModes = { "<模式名>", ... },   -- 试着**真清掉**(能不能清掉看宿主)
+--         resetModes = { "<模式名>", ... },   -- 拨回中性 100(**一定生效**)
 --         preset = "<声库名>/<预设名>"(从 voice-presets.json 套用;给了它就忽略上面那些) }
 --
 -- ⚠️ 实现上**读—改—写整个对象**:官方没说 setVoice 收不收"局部"对象,
@@ -3712,9 +3718,54 @@ function OPS.set_voice(args)
     end
   end
 
+  -- ④ clearModes / resetModes —— 收拾"换声库之后旧唱法一直挂着"那类残留。
+  --
+  -- 两个动作为什么要分开(这是这一节存在的全部理由):
+  --   · `clearModes` = 把模式**从写回的对象里去掉**。**能不能真清掉取决于宿主** ——
+  --     官方没说 setVoice 是"整体替换"还是"逐字段合并";若是后者,去掉键等于没说。
+  --     所以这里**写完必须回读**,并把"清掉了哪些 / 宿主没清掉哪些"如实报出来。
+  --   · `resetModes` = 把三个值**拨回中性**(100)。它不依赖任何未定义语义,**一定生效**,
+  --     听感上等价于"这个模式不起作用了"。宿主不支持真清空时,这是可用的退路。
+  local clearList, resetList = {}, {}
+  local clearExisted = {}   -- 请求清空时**确实存在**的那些(只有它们才谈得上"清没清掉")
+  local function asNameList(v, field)
+    if v == nil then return {} end
+    if type(v) ~= "table" then error(field .. " 必须是数组(模式名)") end
+    local out = {}
+    for i = 1, #v do
+      local n = v[i]
+      if type(n) ~= "string" or #n == 0 then
+        error(field .. "[" .. i .. "] 必须是非空字符串(模式名)")
+      end
+      out[#out + 1] = n
+    end
+    return out
+  end
+  clearList = asNameList(args.clearModes, "clearModes")
+  resetList = asNameList(args.resetModes, "resetModes")
+  local notFound = {}
+  for _, n in ipairs(clearList) do
+    if modes[n] == nil then
+      notFound[#notFound + 1] = n
+    else
+      clearExisted[n] = true
+      modes[n] = nil
+    end
+    touched = true
+  end
+  for _, n in ipairs(resetList) do
+    if modes[n] == nil then
+      notFound[#notFound + 1] = n
+    else
+      modes[n] = { pitch = VOCAL_MODE_NEUTRAL, timbre = VOCAL_MODE_NEUTRAL,
+                   pronunciation = VOCAL_MODE_NEUTRAL }
+    end
+    touched = true
+  end
+
   if not touched and source == "args" then
     error("set_voice 至少要给 loudness / tension / breathiness / gender / toneShift / " ..
-          "vocalModes / preset 之一")
+          "vocalModes / preset / clearModes / resetModes 之一")
   end
   out.vocalModeParams = modes
 
@@ -3733,9 +3784,49 @@ function OPS.set_voice(args)
       end
     end
   end
+
+  -- ⑤ 把"请求清空"的实际情况如实报出来(不静默、不假装)
+  -- ⚠️ 只报**请求时确实存在**的那些:`clearModes:["Nope"]` 里 Nope 本来就没有,
+  --    它在回读里当然也"不在" —— 那不是我们清掉的,不能算进 cleared。
+  local cleared, stillPresent, reset = {}, {}, {}
+  for _, n in ipairs(clearList) do
+    if clearExisted[n] then
+      if backModes[n] == nil then
+        cleared[#cleared + 1] = n
+      else
+        stillPresent[#stillPresent + 1] = n
+      end
+    end
+  end
+  for _, n in ipairs(resetList) do
+    local m = backModes[n]
+    if m ~= nil and m.pitch == VOCAL_MODE_NEUTRAL and m.timbre == VOCAL_MODE_NEUTRAL and
+       m.pronunciation == VOCAL_MODE_NEUTRAL then
+      reset[#reset + 1] = n
+    else
+      -- 回读不是中性值 ⇒ 如实记下(宿主没照做,或者它自己又改了什么)
+      stillPresent[#stillPresent + 1] = n
+    end
+  end
+
+  local notes = {}
+  if #stillPresent > 0 then
+    notes[#notes + 1] = "⚠️ 这几个模式宿主没有照做:" .. table.concat(stillPresent, ", ") ..
+      " —— setVoice 的语义官方没定义(可能是逐字段合并,去掉键等于没说)。" ..
+      "改用 resetModes(拨回中性 " .. tostring(VOCAL_MODE_NEUTRAL) .. ")一定生效。"
+  end
+  if #notFound > 0 then
+    notes[#notes + 1] = "这些模式名在当前对象里本来就没有:" .. table.concat(notFound, ", ")
+  end
+
   return {
     groupName = call(grp, "getName"),
     source = source,
+    cleared = cleared,
+    reset = reset,
+    stillPresent = stillPresent,
+    notFound = notFound,
+    notes = notes,
     readBack = {
       loudness = type(back) == "table" and tonumber(back.paramLoudness) or nil,
       tension = type(back) == "table" and tonumber(back.paramTension) or nil,
