@@ -118,6 +118,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 ```
 
 > ⚠️ `plugin/index.js` 改动需要**重启 DSH**(ESM 模块缓存);SV2 侧脚本只需重跑。
+>
+> **把 `plugin/` 拷进 profile 再 link**(例如 `~/.dsh/profiles/<name>/plugins/sv2-dsh-bridge`),
+> 不要直接 link 到你的开发目录:开发目录随时可能被清空或搬走,而插件是**运行时**要用的东西。
+> 拷过去之后,清空开发目录**不影响已装好的插件** —— 它的所有文件、link、以及 prompt 里
+> 点名的文档(`plugin/docs/`,随包发出、路径运行时算)都在 profile 里。
 
 ### 4. 自检
 
@@ -126,12 +131,12 @@ cd tools
 npm install
 node harness.mjs           # 47 条行为测试
 node check-mutants.mjs     # 66 个变异,漏一个就红
-node check-mutants-js.mjs  # 另外三半:12 个变异,漏一个就红
+node check-mutants-js.mjs  # 另外三半:15 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
-node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,31 条断言)
-node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(34 条断言)
+node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,41 条断言)
+node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(33 条断言)
 ```
 
 ---
@@ -199,7 +204,7 @@ caught   dir-candidates-windows-only.lua
 这套纪律已经抓到过自己的失效两次:两个变异的替换串在加了新代码后
 **匹配到两处**,等于什么都没改 —— 现在生成器要求每条替换**恰好命中一次**。
 
-**另外三半也上同一套门禁**(`make-mutants-js.mjs` / `check-mutants-js.mjs`,12 个变异):
+**另外三半也上同一套门禁**(`make-mutants-js.mjs` / `check-mutants-js.mjs`,15 个变异):
 插件 / 面板 / 浏览器那三半的测试以前**从没被证明过**会不会失败。现在每个变异都指定
 "由哪个测试抓",逐条要求它变红:
 
@@ -208,7 +213,7 @@ caught   plugin-frozen-ignores-missing-heartbeat   (plugin-tests.mjs)
 caught   panel-ask-refreshes-immediately           (panel-tests.mjs)
 caught   client-hardcoded-color                    (check-client.mjs)
 ...
-12/12 个变异被抓到
+15/15 个变异被抓到
 ✓ 插件 / 面板 / 浏览器三半的测试确实会失败(不是永远绿的摆设)
 ```
 
@@ -231,7 +236,7 @@ caught   client-hardcoded-color                    (check-client.mjs)
 它错了没人会告诉你 —— 只会在 DSH 里安静地难看。所以把要求写成判据,
 连**"状态卡必须显示能不能回滚 / 卡在哪个 op / 快照失败过没有"**都一起钉住。
 
-**插件半边也有行为测试**(`plugin-tests.mjs`,31 条断言):在 `.harness-run/` 里造一份
+**插件半边也有行为测试**(`plugin-tests.mjs`,41 条断言):在 `.harness-run/` 里造一份
 假的 home 与通道目录,把心跳 / 面包屑 / 快照栈写成**精心构造的那几种状态**,
 再真的去调 `sv_status` / `sv_doctor` / `sv_transpose`,断言输出。
 `check-plugin.mjs` 只验"工具定义合法",不跑业务逻辑 —— 而插件侧最容易错的就是
@@ -243,7 +248,7 @@ caught   client-hardcoded-color                    (check-client.mjs)
 所以 `**粗体**` / 反引号 / `##` 要先变回纯文本(在两百多像素宽的框里,
 那些字符既占宽度又是噪音);超过 1200 字则**自述**截断并指路到 DSH。
 
-**面板半边同样有离线测试**(`panel-tests.mjs`,34 条断言):用一个假 SV 把
+**面板半边同样有离线测试**(`panel-tests.mjs`,33 条断言):用一个假 SV 把
 `DSHPanel.js` 真的加载起来,调它自己的 `getSidePanelSectionState()` 看交出来的 rows。
 它守的是面板**看不见**的两件事:
 

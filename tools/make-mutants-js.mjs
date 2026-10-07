@@ -106,6 +106,28 @@ export const MUTANTS = [
     'client', 'check-client.mjs',
     [["h('span', { className: 'svdb-title' }, 'Synthesizer V 桥')",
       "h('span', { className: 'svdb-title' }, '🎹 Synthesizer V 桥')"]]],
+
+  // ---- 随包文档(plugin-tests.mjs / check-file.mjs)------------------------
+  // 起因:用户问"工作区清空对插件有没有影响"。prompt 里原来指向的是**工作区相对**
+  // 路径,工作区一清空那句话就失效了。这三条钉住"文档随包发 + 路径运行时算"。
+
+  ['plugin-resolve-doc-guesses',
+    'plugin: resolveDoc 对不存在的文档也返回路径(于是 prompt 里会印出一个不存在的文件,agent 白跑一步)',
+    'plugin', 'plugin-tests.mjs',
+    [['  const p = path.join(DOCS_DIR, fileName)\n  try {\n    return fs.existsSync(p) ? p : null',
+      '  const p = path.join(DOCS_DIR, fileName)\n  try {\n    return p   // MUTANT: 不检查存在性']]],
+
+  ['plugin-docs-not-bundled',
+    'plugin: BUNDLED_DOCS 里写一个包里没有的名字(清单与文件脱节)',
+    'plugin', 'check-file.mjs',
+    [["export const BUNDLED_DOCS = ['全参流程.md', '音频转音符.md']",
+      "export const BUNDLED_DOCS = ['查无此文档.md']   // MUTANT: 清单与文件脱节"]]],
+
+  ['plugin-prompt-hardcoded-doc-path',
+    'plugin: prompt 里又把文档路径写死成工作区相对路径(工作区一清空就变成空话)',
+    'plugin', 'check-file.mjs',
+    [["          fullDoc\n            ? `完整版见 ${fullDoc} —— **动手前先读它**。同目录还有 音频转音符.md。要点:`\n            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',",
+      "          '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',   // MUTANT: 写死工作区相对路径"]]],
 ]
 
 function apply(src, subs, name) {

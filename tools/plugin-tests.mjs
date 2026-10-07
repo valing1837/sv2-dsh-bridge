@@ -67,6 +67,8 @@ write('svdsh-boot-sv.json', { ok: true, bridge: '0.8.0', dir: DIR, ts: now - 60 
 // ---- 桩 ctx --------------------------------------------------------------
 const tools = []
 const routes = []
+// 捕获提示词段 —— 这样"prompt 里到底写了什么"也能被断言,而不只是工具定义。
+const sections = []
 const makeEffect = () => (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} }
 const ctx = {
   get: () => undefined,
@@ -75,7 +77,7 @@ const ctx = {
   inject: (_names, cb) => cb({
     effect: makeEffect(), on: () => () => {}, get: () => undefined,
     webServer: { register: (r) => { routes.push(r); return () => {} } },
-    systemPrompt: { section: () => () => {} },
+    systemPrompt: { section: (s) => { sections.push(s); return () => {} } },
     interval: () => () => {}, setInterval: () => () => {},
   }),
   tools: { register: (def) => { tools.push(def); return () => {} } },
@@ -190,6 +192,32 @@ check('超长回复会截断', capped.length < long.length && capped.length < PA
 check('⚠️ 截断必须自述(说清还剩多少字、去哪儿看)',
   /还有 500 字/.test(capped) && /DSH/.test(capped), capped.slice(-60))
 check('不超长就不动它', capPanelText('短回复') === '短回复')
+
+console.log('\n— 随包文档:prompt 点名的文件必须真的在包里,且路径是算出来的')
+// 起因(2026-10-07,用户问"工作区清空对插件有没有影响"):prompt 里原本写的是
+// `sv-dsh/docs/全参流程.md` —— 一个**工作区相对**路径。用户清空工作区之后,
+// 那句话就成了空话(agent 会去找一个不存在的文件)。现在文档随包发、路径运行时算。
+const { resolveDoc, BUNDLED_DOCS } = mod
+check('导出了 resolveDoc / BUNDLED_DOCS',
+  typeof resolveDoc === 'function' && Array.isArray(BUNDLED_DOCS))
+check('清单非空', (BUNDLED_DOCS ?? []).length > 0, BUNDLED_DOCS)
+for (const n of BUNDLED_DOCS ?? []) {
+  const p = resolveDoc(n)
+  check(`resolveDoc("${n}") 指到一个真实文件`, typeof p === 'string' && fs.existsSync(p), p)
+}
+check('解析出来的路径在插件自己的 docs/ 里(不是工作区)',
+  String(resolveDoc('全参流程.md')).includes(`${path.sep}docs${path.sep}`),
+  resolveDoc('全参流程.md'))
+check('⚠️ 不在包里的文档名返回 null —— 不猜一个"看起来对"的路径',
+  resolveDoc('不存在的文档.md') === null, resolveDoc('不存在的文档.md'))
+// 提示词段:拿到的应该是**绝对路径**,而不是老那句工作区相对路径
+const promptSection = sections.find((s) => s && s.name === 'sv-dsh-bridge')
+const promptText = promptSection ? [].concat(promptSection.text).join('\n') : ''
+check('提示词段拿到了', promptText.length > 0, promptSection && promptSection.name)
+check('提示词里给的是解析后的绝对路径',
+  promptText.includes(resolveDoc('全参流程.md')), promptText.slice(0, 0) || '')
+check('提示词里不再有工作区相对的 sv-dsh/docs/ 路径',
+  !promptText.includes('sv-dsh/docs/'))
 
 console.log('')
 if (failed === 0) {
