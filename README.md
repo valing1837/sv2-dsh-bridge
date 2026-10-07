@@ -5,8 +5,8 @@
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
-[![Tests](https://img.shields.io/badge/tests-45%2F45-brightgreen.svg)](tools/harness.mjs)
-[![Mutants](https://img.shields.io/badge/mutants-62%2F62%20caught-brightgreen.svg)](tools/check-mutants.mjs)
+[![Tests](https://img.shields.io/badge/tests-46%2F46-brightgreen.svg)](tools/harness.mjs)
+[![Mutants](https://img.shields.io/badge/mutants-66%2F66%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
 ---
 
@@ -124,8 +124,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 ```bash
 cd tools
 npm install
-node harness.mjs           # 45 条行为测试
-node check-mutants.mjs     # 62 个变异,漏一个就红
+node harness.mjs           # 46 条行为测试
+node check-mutants.mjs     # 66 个变异,漏一个就红
 node check-mutants-js.mjs  # 另外三半:12 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
@@ -177,11 +177,11 @@ node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(3
 
 ## 测试
 
-**45 条行为测试**,跑在一个离线装置上:
+**46 条行为测试**,跑在一个离线装置上:
 [fengari](https://github.com/fengari-lua/fengari)(纯 JS 的 Lua 5.4)执行真的桥代码,
 配一个假宿主(`tools/fake-sv.lua`),不需要开 SV2。
 
-**62 个变异,每个都必须让测试变红。**
+**66 个变异,每个都必须让测试变红。**
 
 一个从没红过的测试套件不是证据。`tools/make-mutants.mjs` 把**真实发生过的 bug**
 打进桥的副本,`check-mutants.mjs` 逐个跑,要求全部被抓到:
@@ -192,7 +192,7 @@ caught   split-notes-ascending.lua
 caught   restore-remove-ascending.lua
 caught   dir-candidates-windows-only.lua
 ...
-62/62 个变异被抓到
+66/66 个变异被抓到
 ✓ 测试套件确实会失败(不是永远绿的摆设)
 ```
 

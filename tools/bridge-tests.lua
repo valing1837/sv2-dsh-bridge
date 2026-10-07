@@ -317,6 +317,20 @@ function __T_notesState()
   return T.jenc(out)
 end
 
+-- ---- 声音属性层(0.8.4)----------------------------------------------------
+-- 只读探针:宿主里**当前组**的原始 voice 对象(测试拿它断言"到底写进去没有")。
+function __T_voiceRaw()
+  local ed = H.editor
+  if ed == nil then return "null" end
+  local r = ed:getCurrentGroup()
+  if r == nil then return "null" end
+  return T.jenc(r:getVoice())
+end
+
+-- setVoice 的语义开关:true = 逐字段合并(真机可能是这样),false = 整体替换。
+-- 桥的 clearModes **必须两种都能正确报告** —— 这就是那个开关存在的意义。
+function __T_setVoiceMerge(v) H.setVoiceMerge(v == true) end
+
 -- 属性的确定性序列化。
 -- ⚠️ 不能对表用 tostring:那给的是**内存地址**,同一个值两次快照可能不一样,
 --    "一个字节都没写"这条断言就会变成偶发红。逐音素属性数组正是个表

@@ -463,6 +463,31 @@ end`]]],
     'restoreLayout: restore the time range but not the time offset (the group comes back to the right track at the wrong place)',
     [['            if math.floor(num(call(ref, "getTimeOffset")) or 0) ~= w.timeOffset then',
       '            if false then   -- MUTANT: 不还原时间偏移']]],
+
+  // ---- 0.8.4:声音属性层(clearModes / resetModes)--------------------------
+
+  // 整体回写时只带 args 里的模式 ⇒ 没提到的模式被顺手清掉("读—改—写"的核心保证没了)。
+  ['set-voice-drops-untouched-modes',
+    'set_voice: build vocalModeParams from the args only (every mode not mentioned in this call is silently wiped)',
+    [['  local modes = {}\n  if type(cur.vocalModeParams) == "table" then',
+      '  local modes = {}\n  if false then   -- MUTANT: 不带上已有的模式']]],
+
+  // 不回读就报"清掉了" ⇒ 宿主其实是逐字段合并时,用户以为清干净了、实际还在。
+  ['set-voice-clear-ignores-readback',
+    'set_voice clearModes: report "cleared" without checking the read-back (a host that merges silently keeps the mode while we claim it is gone)',
+    [['    if clearExisted[n] then\n      if backModes[n] == nil then',
+      '    if clearExisted[n] then\n      if true then   -- MUTANT: 不查回读']]],
+
+  // 把"本来就没有"的名字也算成"清掉了" ⇒ 报告里的 cleared 不再可信。
+  ['set-voice-cleared-counts-notfound',
+    'set_voice clearModes: count a name that never existed as "cleared" (it is absent from the read-back for a different reason)',
+    [['    if clearExisted[n] then\n      if backModes[n] == nil then',
+      '    if true then   -- MUTANT: 本来就没有的也算清掉了\n      if backModes[n] == nil then']]],
+
+  // 中性值写错 ⇒ "拨回默认"变成"拨到 0",听感完全不是一回事。
+  ['set-voice-reset-wrong-neutral',
+    'VOCAL_MODE_NEUTRAL: reset vocal modes to 0 instead of the default 100 (audibly a different place entirely)',
+    [['local VOCAL_MODE_NEUTRAL = 100', 'local VOCAL_MODE_NEUTRAL = 0   -- MUTANT: 中性值写错']]],
 ]
 
 function apply(src, subs, name) {

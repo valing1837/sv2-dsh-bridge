@@ -112,6 +112,7 @@ const TESTS = [
   ['42', 'snapshot + restore: edit / delete / split / UUID / corrupt'],
   ['43', 'selftest: the full-chain self check'],
   ['44', 'snapshot + restore: the group-level layout'],
+  ['45', 'voice layer: merge / clearModes / resetModes'],
 ]
 
 const results = new Map()
@@ -2709,6 +2710,97 @@ function testSnapshotLayout() {
 }
 
 // ---------------------------------------------------------------------------
+// test 45 — the voice layer: merge, clearModes, resetModes
+// ---------------------------------------------------------------------------
+// 这一层以前**一条测试都没有**(假宿主里根本没有 getVoice/setVoice)。而它正是
+// CHANGELOG「计划中」第二条所在:"换声库后旧唱法会一直挂着"。
+// 现在钉住三件事:
+//   ① 读—改—写整体回写**不会顺手清掉**没提到的字段(这是现有实现的核心保证);
+//   ② `clearModes` 能不能真清掉**取决于宿主语义**(官方没定义)⇒ 必须回读并如实报;
+//   ③ `resetModes` 拨回中性值 —— 不依赖那个语义,**两种宿主语义下都必须生效**。
+function testVoiceLayer() {
+  const c = checks()
+  resetWorld()
+
+  const voiceRaw = () => JSON.parse(callGlobal(L, '__T_voiceRaw'))
+  const seed = () => req('set_voice', {
+    loudness: -3,
+    vocalModes: { Mellow: { pitch: 70, timbre: 80, pronunciation: 90 }, Soft: { pitch: 60 } },
+  })
+
+  // (a) 初值
+  const a = req('get_voice', {})
+  c.eq('(a) get_voice ok', a.ok, true)
+  c.eq('(a) loudness 初值', a.result.loudness, 0)
+  // ⚠️ 空表经 jenc 出来是 `[]`(Lua 分不清空表是对象还是数组)—— 既有行为,不是这次引入的
+  c.eq('(a) 还没有 vocal mode', JSON.stringify(a.result.vocalModes), '[]')
+
+  // (b) 铺两个模式,再只改一个标量 ⇒ 模式与其它标量都必须活着(读—改—写)
+  const b1 = seed()
+  c.eq('(b) 铺两个模式 ok', b1.ok, true)
+  c.eq('(b) 回读到两个模式', Object.keys(b1.result.readBack.vocalModes).sort().join(','),
+    'Mellow,Soft')
+  const b2 = req('set_voice', { tension: 0.5 })
+  c.eq('(b) 只改 tension ok', b2.ok, true)
+  c.eq('(b) tension 写进去了', b2.result.readBack.tension, 0.5)
+  c.eq('(b) loudness 没被顺手清掉', b2.result.readBack.loudness, -3)
+  c.eq('(b) 两个模式都还在', Object.keys(b2.result.readBack.vocalModes).sort().join(','),
+    'Mellow,Soft')
+  c.eq('(b) 模式的值也没被动', b2.result.readBack.vocalModes.Mellow.pitch, 70)
+  c.eq('(b) 宿主里确实是这样', Object.keys(voiceRaw().vocalModeParams).sort().join(','),
+    'Mellow,Soft')
+
+  // (c) clearModes:宿主**整体替换**时,清得掉
+  callGlobal(L, '__T_setVoiceMerge', [false])
+  const c1 = req('set_voice', { clearModes: ['Mellow'] })
+  c.eq('(c) clearModes ok', c1.ok, true)
+  c.eq('(c) 报告 cleared', JSON.stringify(c1.result.cleared), '["Mellow"]')
+  c.eq('(c) 没有 stillPresent', JSON.stringify(c1.result.stillPresent), '[]')
+  c.eq('(c) 宿主里真的没了', Object.keys(voiceRaw().vocalModeParams).join(','), 'Soft')
+
+  // (d) clearModes:宿主**逐字段合并**时清不掉 ⇒ 必须如实说,并指向 resetModes
+  resetWorld()
+  seed()
+  callGlobal(L, '__T_setVoiceMerge', [true])
+  const d1 = req('set_voice', { clearModes: ['Mellow'] })
+  c.eq('(d) clearModes 仍算成功(请求发出去了)', d1.ok, true)
+  c.eq('(d) 报告里 cleared 为空', JSON.stringify(d1.result.cleared), '[]')
+  c.eq('(d) 如实报 stillPresent', JSON.stringify(d1.result.stillPresent), '["Mellow"]')
+  c.ok('(d) 并且说清原因与退路',
+    d1.result.notes.some((n) => /宿主没有照做/.test(n) && /resetModes/.test(n)),
+    d1.result.notes)
+  c.eq('(d) 宿主里确实还在', Object.keys(voiceRaw().vocalModeParams).includes('Mellow'), true)
+
+  // (e) resetModes:两种语义下都必须生效(这是"一定生效"的那条路)
+  const e1 = req('set_voice', { resetModes: ['Mellow'] })
+  c.eq('(e) resetModes ok(合并语义下)', e1.ok, true)
+  c.eq('(e) 报告 reset', JSON.stringify(e1.result.reset), '["Mellow"]')
+  c.eq('(e) 回读是中性值', JSON.stringify(e1.result.readBack.vocalModes.Mellow),
+    JSON.stringify({ pitch: 100, timbre: 100, pronunciation: 100 }))
+  callGlobal(L, '__T_setVoiceMerge', [false])
+  const e2 = req('set_voice', { resetModes: ['Soft'] })
+  c.eq('(e) resetModes ok(替换语义下)', e2.ok, true)
+  c.eq('(e) 报告 reset', JSON.stringify(e2.result.reset), '["Soft"]')
+  c.eq('(e) 回读是中性值', e2.result.readBack.vocalModes.Soft.pitch, 100)
+
+  // (f) 不认识的名字:如实报 notFound,不报错、不猜
+  const f1 = req('set_voice', { clearModes: ['Nope'], resetModes: ['AlsoNope'] })
+  c.eq('(f) 仍算成功', f1.ok, true)
+  c.eq('(f) notFound 两个', f1.result.notFound.sort().join(','), 'AlsoNope,Nope')
+  c.eq('(f) cleared 为空', JSON.stringify(f1.result.cleared), '[]')
+
+  // (g) 参数校验
+  const g1 = req('set_voice', {})
+  c.eq('(g) 什么都不给要拒', g1.ok, false)
+  c.ok('(g) 报错里列了 clearModes / resetModes',
+    /clearModes/.test(g1.error || '') && /resetModes/.test(g1.error || ''), g1.error)
+  c.eq('(g) clearModes 不是数组要拒', req('set_voice', { clearModes: 'Mellow' }).ok, false)
+  c.eq('(g) resetModes 里塞数字要拒', req('set_voice', { resetModes: [123] }).ok, false)
+
+  c.done('45', TESTS[45][1])
+}
+
+// ---------------------------------------------------------------------------
 // beyond-spec observations (NOT tests): printed as NOTE, never as a failure
 // ---------------------------------------------------------------------------
 
@@ -2883,6 +2975,7 @@ const PLAN = [
   ['42', testSnapshotRestore],
   ['43', testSelftest],
   ['44', testSnapshotLayout],
+  ['45', testVoiceLayer],
 ]
 
 function main() {
