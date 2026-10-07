@@ -68,6 +68,18 @@ export const MUTANTS = [
   // ---- 面板半边(panel-tests.mjs)-----------------------------------------
   // 2026-10-07 两次大改之后:快捷动作删了、回复区从 TextArea 换成纯文字。
   // 变异清单跟着改 —— 指向已删代码的变异会被生成器直接判"模式命中 0 次"。
+  ['panel-hides-picked-option',
+    '面板:点选的选项不在回复区显示(用户 2026-10-07 明确要求显示"我选的")',
+    'panel', 'panel-tests.mjs',
+    [["    if (e.who === 'you' && !e.picked) continue",
+      "    if (e.who === 'you') continue   // MUTANT: 点选的也不显示"]]],
+
+  ['panel-keeps-ask-text-after-pick',
+    '面板:点完选项后那一大段"题目+选项列表"还留在回复区(刷屏,而且你已经选完了)',
+    'panel', 'panel-tests.mjs',
+    [["            st.log = [{ who: 'you', text: String(pick), picked: true, at: Date.now() }]",
+      "            logPush('you', pick)   // MUTANT: 不替换,列表留着"]]],
+
   ['panel-reply-back-to-textarea',
     '面板:回复区又变回 TextArea(宿主没有只读字段 ⇒ 用户又能往里打字了 —— 用户 2026-10-07 报的正是这个)',
     'panel', 'panel-tests.mjs',

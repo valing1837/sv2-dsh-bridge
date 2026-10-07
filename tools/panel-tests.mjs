@@ -263,6 +263,19 @@ ctx.st.ask = savedAsk
 ctx.st.log = savedLog
 ctx.renderLog()
 
+// ---------------------------------------------------------------------------
+console.log('\n— 点选项之后:把你选的显示在回复区(用户 2026-10-07)')
+ctx.wAsk[0]._cb() // 假装用户点了第一个选项
+check('点了选项 ⇒ 选项消失', ctx.st.ask === null)
+check('选中项被记下来(带 picked 标记)',
+  ctx.st.log.length === 1 && ctx.st.log[0].picked === true && ctx.st.log[0].text === '保持原样', ctx.st.log)
+check('回复区显示「你选:保持原样」',
+  ctx.st.replyLines.join('\n').includes('你选:保持原样'), ctx.st.replyLines)
+check('原来那一大段"题目 + 选项列表"被替换掉了(不然回复区被刷满)',
+  !ctx.st.replyLines.join('\n').includes('请选择'), ctx.st.replyLines)
+check('并且挂了待刷新(纯文字要重建才看得到)', ctx.st.needsRefresh === true)
+check('仍然只有一个小输入框(点选项不会多出输入位)', areasOf(ctx.getSidePanelSectionState()).length === 1)
+
 // 输入框干净之后,step() 才真的重建
 const refreshesBefore = log.refreshes
 ctx.step()
