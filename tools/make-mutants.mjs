@@ -488,6 +488,19 @@ end`]]],
   ['set-voice-reset-wrong-neutral',
     'VOCAL_MODE_NEUTRAL: reset vocal modes to 0 instead of the default 100 (audibly a different place entirely)',
     [['local VOCAL_MODE_NEUTRAL = 100', 'local VOCAL_MODE_NEUTRAL = 0   -- MUTANT: 中性值写错']]],
+
+  // ---- 0.9.3:属性层也进快照 --------------------------------------------------
+
+  // 快照不存属性层 ⇒ 回滚时"音符层一致"照样通过,属性却没回去(最坏的静默)。
+  ['snapshot-drops-attrs',
+    'snapshot: stop capturing the attribute layer (set_note_attrs becomes un-rollbackable while restore still reports success)',
+    [['        attrs = captureAttrs(nt),\n', '        -- MUTANT: 不存属性层\n']]],
+
+  // 存了但写不回去 —— 同样会出现"报成功、其实没回去"。
+  ['restore-skips-attrs',
+    'restore: capture the attribute layer but never write it back (the read-back then reports a mismatch, or worse, is not compared at all)',
+    [['    if want.attrs ~= nil and nt ~= nil then applyAttrs(nt, want.attrs) end',
+      '    if false then applyAttrs(nt, want.attrs) end   -- MUTANT: 不写回属性']]],
 ]
 
 function apply(src, subs, name) {

@@ -2521,7 +2521,12 @@ function testSnapshotRestore() {
   c.eq('(b) noteCount', b.result && b.result.noteCount, N)
   c.ok('(b) the snapshot file exists', callGlobal(L, '__T_snapRaw').length > 0)
   c.ok('(b) the reply states what is NOT covered (no over-promising)',
-    /属性层/.test((b.result && b.result.notCovered) || ''), b.result && b.result.notCovered)
+    /组库里的孤儿数据/.test((b.result && b.result.notCovered) || ''), b.result && b.result.notCovered)
+  // 0.9.3:属性层**现在覆盖了** ⇒ 返回里必须写明(不然没人知道可以回滚它)
+  c.ok('(b) covers 里写明包含属性层',
+    /属性层/.test((b.result && b.result.covers) || ''), b.result && b.result.covers)
+  c.ok('(b) notCovered 不再把属性层列为"救不了"',
+    !/属性层/.test((b.result && b.result.notCovered) || ''), b.result && b.result.notCovered)
 
   // (c) a host-side edit (pitch + time range) is undone by restore
   callGlobal(L, '__T_setPitch', [1, 71])
@@ -2529,7 +2534,10 @@ function testSnapshotRestore() {
   c.ok('(c) the edit really changed the group', callGlobal(L, '__T_notesState') !== A0)
   const r1 = req('restore', {})
   c.eq('(c) restore ok', r1.ok, true)
-  c.eq('(c) no read-back mismatch', r1.result && r1.result.mismatchCount, 0)
+  // ⚠️ 失败信息里必须带上**明细** —— 只说"3 处不一致"等于没说(这次排查就吃了这个亏)。
+  c.ok('(c) no read-back mismatch',
+    (r1.result && r1.result.mismatchCount) === 0,
+    (r1.result && r1.result.mismatch) || [])
   c.eq('(c) the group is back to the snapshot', callGlobal(L, '__T_notesState'), A0)
 
   // (d) a deleted note comes back (create + addNote path)
@@ -2569,7 +2577,40 @@ function testSnapshotRestore() {
     JSON.stringify(req('get_notes', {}).result.notes), B0)
   callGlobal(L, '__T_useGroupAt', [1])
 
-  // (g) unknown id / corrupt snapshot ⇒ refuse, and say why
+  // (g) 0.9.3:属性层也进快照 —— 改属性后回滚,属性必须回来。
+  //     为什么单列一条:`set_note_attrs` 一直在自动快照名单里,而快照以前**不存属性层**
+  //     ⇒ 回滚时逐音符比对照样通过、返回"已回到快照",属性其实没回去(最坏的静默)。
+  const attrOf = (i) => {
+    const n = at(notesOf(groupsOf()[0]), i)
+    return { phonemes: n[5], detune: n[6], lang: n[7], rap: n[8] }
+  }
+  const attrBefore = attrOf(0)
+  const snapAttr = req('snapshot', { label: 'before-attrs' })
+  c.eq('(g) snapshot ok', snapAttr.ok, true)
+  const writeAttr = req('set_note_attrs', {
+    expectFp: callGlobal(L, '__T_selectionFp'),
+    updates: [
+      { index: 0, detune: -35, language: 'en', phonemes: 'k a' },
+      { index: 1, rapAccent: '4' },
+    ],
+  })
+  c.eq('(g) 属性写成功', writeAttr.ok, true)
+  c.ok('(g) 宿主里真的变了',
+    attrOf(0).detune === -35 && attrOf(0).lang === 'en' && attrOf(0).phonemes === 'k a',
+    attrOf(0))
+  const backAttr = req('restore', {})
+  c.eq('(g) restore ok', backAttr.ok, true)
+  c.ok('(g) ⚠️ 属性层回读零不一致(以前这里会因为"只比音符层"而漏掉属性)',
+    (backAttr.result && backAttr.result.mismatchCount) === 0,
+    (backAttr.result && backAttr.result.mismatch) || [])
+  c.eq('(g) detune 回去了', attrOf(0).detune, attrBefore.detune)
+  c.eq('(g) 语种回去了', attrOf(0).lang, attrBefore.lang)
+  c.eq('(g) 音素串回去了', attrOf(0).phonemes, attrBefore.phonemes)
+  c.ok('(g) covers 里写明包含属性层',
+    /属性层/.test((backAttr.result && backAttr.result.covers) || ''),
+    backAttr.result && backAttr.result.covers)
+
+  // (h) unknown id / corrupt snapshot ⇒ refuse, and say why
   const g = req('restore', { id: 's99' })
   c.eq('(g) an unknown id is refused', g.ok, false)
   c.ok('(g) the error lists the ids that do exist', /s1/.test(g.error || ''), g.error)

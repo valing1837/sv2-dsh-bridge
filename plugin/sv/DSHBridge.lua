@@ -4830,7 +4830,110 @@ local function snapSave(store)
   return writeAtomic(snapPath(), jenc(store))
 end
 
+-- 深拷贝宿主给的普通表(宿主可能复用/改它 —— 不拷的话快照会跟着变)。
+local function deepCopyPlain(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, val in pairs(v) do out[k] = deepCopyPlain(val) end
+  return out
+end
+
+-- **稳定**序列化(键排序)⇒ 只用来**比对**两个宿主给的表。
+-- ⚠️ 不能直接用 jenc:`pairs` 的顺序在 Lua 里不确定 ⇒ 同一个值两次编码可能不一样,
+--    回读比对会偶发红。(测试台里的 attrValue 就是为这个坑写的。)
+local function canonical(v)
+  local t = type(v)
+  if t == "table" then
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(x, y)
+      local nx, ny = tonumber(x), tonumber(y)
+      if nx ~= nil and ny ~= nil then return nx < ny end
+      if nx ~= nil then return true end
+      if ny ~= nil then return false end
+      return tostring(x) < tostring(y)
+    end)
+    local parts = {}
+    for i = 1, #keys do
+      parts[#parts + 1] = tostring(keys[i]) .. "=" .. canonical(v[keys[i]])
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  if t == "boolean" then return v and "true" or "false" end
+  return tostring(v)
+end
+
+-- 属性层比对:**单向包含** —— 快照里有的键,读回必须一样。
+-- ⚠️ 为什么不是"完全相等"(踩过):宿主对"没写过"的键,有的 getter 返回 ""(假宿主就是这样),
+--    而我们写回时宿主又把这些键标记成"写过" ⇒ 读回那边会**多出**一堆空壳键(值其实一样)。
+--    那是回滚动作本身留下的痕迹,不是"没回去"。所以:多出来的不算错,**值不对才算错**。
+--    ⚠️ 底线:`want` 里有的值,`got` 必须一模一样 —— 真没回去的一定会被抓到。
+local function attrsContained(want, got)
+  if want == nil then return true end          -- 快照没存属性 ⇒ 读回有什么都不算错
+  if type(want) ~= "table" then return want == got end
+  if type(got) ~= "table" then return false end
+  for k, v in pairs(want) do
+    if type(v) == "table" then
+      if not attrsContained(v, got[k]) then return false end
+    elseif got[k] ~= v then
+      return false
+    end
+  end
+  return true
+end
+
+-- 抓一个音符的**属性层**。
+-- ⚠️ 只存**宿主真给过的键**(没写过的是 nil)⇒ 大多数音符这里是 nil,快照不会因此变胖;
+--    真设过属性的那些才占地方。
+local function captureAttrs(nt)
+  local a = {}
+  local any = false
+  local scalars = {
+    { key = "detune", get = "getDetune" },
+    { key = "phonemes", get = "getPhonemes" },
+    { key = "language", get = "getLanguageOverride" },
+    { key = "rapAccent", get = "getRapAccent" },
+    { key = "musicalType", get = "getMusicalType" },
+    { key = "pitchAutoMode", get = "getPitchAutoMode" },
+  }
+  for i = 1, #scalars do
+    local v = call(nt, scalars[i].get)
+    if v ~= nil then
+      a[scalars[i].key] = v
+      any = true
+    end
+  end
+  local raw = call(nt, "getAttributes")
+  if type(raw) == "table" and next(raw) ~= nil then
+    a.attributes = deepCopyPlain(raw)
+    any = true
+  end
+  if not any then return nil end
+  return a
+end
+
+-- 把属性层写回去。
+-- ⚠️ **顺序有讲究**:① 先 musicalType(rapAccent 只对 rap 音符有效);
+--    ② 再 language(改语种会让这个音符的**全部音素重算**,所以必须排在音素之前);
+--    ③ 最后才是 attributes。
+-- ⚠️ 不在这里判断成败:`call` 失败只返回 nil,判不准;**靠 ④ 的回读比对**报错 ——
+--    那条路是诚实的(不一致就列进 mismatch)。
+local function applyAttrs(nt, want)
+  local order = { "musicalType", "language", "phonemes", "rapAccent", "detune", "pitchAutoMode" }
+  for i = 1, #order do
+    local key = order[i]
+    local spec = ATTR_WHITELIST[key]
+    if want[key] ~= nil and spec ~= nil then call(nt, spec.setter, want[key]) end
+  end
+  if type(want.attributes) == "table" then
+    call(nt, "setAttributes", deepCopyPlain(want.attributes))
+  end
+end
+
 -- 组的音符状态(快照的原子单位)
+--
+-- ⚠️ 0.9.3 起也存**属性层**(见 captureAttrs)。以前不存,而 set_note_attrs 一直在
+--    自动快照名单里 ⇒ 回滚时"音符层一致"照样通过,属性却没回去 —— 最坏的静默。
 local function captureNotes(grp)
   local n = num(call(grp, "getNumNotes")) or 0
   local notes = {}
@@ -4842,6 +4945,7 @@ local function captureNotes(grp)
         dur = math.floor(num(call(nt, "getDuration")) or 0),
         pitch = math.floor(num(call(nt, "getPitch")) or 0),
         lyrics = tostring(call(nt, "getLyrics") or ""),
+        attrs = captureAttrs(nt),
       }
     end
   end
@@ -4855,7 +4959,7 @@ local function sortedByOnset(notes)
   local copy = {}
   for i = 1, #notes do
     copy[i] = { onset = notes[i].onset, dur = notes[i].dur, pitch = notes[i].pitch,
-                lyrics = notes[i].lyrics, srcIndex = i }
+                lyrics = notes[i].lyrics, attrs = notes[i].attrs, srcIndex = i }
   end
   table.sort(copy, function(a, b)
     if a.onset == b.onset then return a.srcIndex < b.srcIndex end
@@ -5187,8 +5291,8 @@ function OPS.snapshot(args)
     noteCount = item.noteCount, kept = #store.items, max = SNAP_MAX,
     trackCount = (type(layout) == "table") and #layout or 0,
     refCount = refCount,
-    covers = "音符层(onset / duration / pitch / lyrics)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
-    notCovered = "属性层(音素 / detune / attributes)、组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
+    covers = "音符层(onset / duration / pitch / lyrics)+ 属性层(音素 / 语种 / 说唱重音 / detune / 演唱类型 / 属性表)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
+    notCovered = "组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
     note = "回滚用 restore {}(最近一份)或 restore { id = \"" .. item.id .. "\" }",
   }
 end
@@ -5289,6 +5393,11 @@ function OPS.restore(args)
       call(nt, "setLyrics", want.lyrics)
       written = written + 1
     end
+    -- ---- ③b 属性层(0.9.3)----
+    -- ⚠️ 以前这里没有这一步:set_note_attrs 一直在自动快照名单里,但快照不存属性层,
+    --    而回读比对只看 onset/时值/音高/歌词 ⇒ **照样报"已回到快照"**,属性其实没回去。
+    --    最坏的那种静默:用户以为回去了。现在逐音符写回 + 回读比对(见 ④)。
+    if want.attrs ~= nil and nt ~= nil then applyAttrs(nt, want.attrs) end
   end
 
   -- ---- ④ 回读核对(写完读回来比,这是本仓库的纪律) ----
@@ -5302,13 +5411,16 @@ function OPS.restore(args)
     mismatch[#mismatch + 1] = string.format("条数 %d ≠ 快照 %d", #a, #w)
   else
     for i = 1, #w do
+      local attrDiff = not attrsContained(w[i].attrs, a[i].attrs)
       if a[i].onset ~= w[i].onset or a[i].dur ~= w[i].dur or
-         a[i].pitch ~= w[i].pitch or a[i].lyrics ~= w[i].lyrics then
+         a[i].pitch ~= w[i].pitch or a[i].lyrics ~= w[i].lyrics or attrDiff then
         if #mismatch < 5 then
           mismatch[#mismatch + 1] = string.format(
-            "第 %d 个:读回 %d/%d/%d/%s ≠ 快照 %d/%d/%d/%s", i - 1,
+            "第 %d 个:读回 %d/%d/%d/%s%s ≠ 快照 %d/%d/%d/%s%s", i - 1,
             a[i].onset, a[i].dur, a[i].pitch, tostring(a[i].lyrics),
-            w[i].onset, w[i].dur, w[i].pitch, tostring(w[i].lyrics))
+            attrDiff and (" [属性层 " .. canonical(a[i].attrs) .. "]") or "",
+            w[i].onset, w[i].dur, w[i].pitch, tostring(w[i].lyrics),
+            attrDiff and (" [属性层 " .. canonical(w[i].attrs) .. "]") or "")
         end
       end
     end
@@ -5329,8 +5441,8 @@ function OPS.restore(args)
     layout = layout,
     verdict = (#mismatch == 0) and "OK:与快照逐音符一致(按 onset 排序比对)"
       or "⚠️ 回读与快照不一致 —— 见 mismatch",
-    covers = "音符层(onset / duration / pitch / lyrics)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
-    notCovered = "属性层(音素 / detune / attributes)、组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
+    covers = "音符层(onset / duration / pitch / lyrics)+ 属性层(音素 / 语种 / 说唱重音 / detune / 演唱类型 / 属性表)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
+    notCovered = "组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
   }
 end
 
