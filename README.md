@@ -131,12 +131,12 @@ cd tools
 npm install
 node harness.mjs           # 47 条行为测试
 node check-mutants.mjs     # 66 个变异,漏一个就红
-node check-mutants-js.mjs  # 另外三半:17 个变异,漏一个就红
+node check-mutants-js.mjs  # 另外三半:19 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
 node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,51 条断言)
-node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(33 条断言)
+node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律 / 版面顺序(36 条断言)
 ```
 
 ---
@@ -204,7 +204,7 @@ caught   dir-candidates-windows-only.lua
 这套纪律已经抓到过自己的失效两次:两个变异的替换串在加了新代码后
 **匹配到两处**,等于什么都没改 —— 现在生成器要求每条替换**恰好命中一次**。
 
-**另外三半也上同一套门禁**(`make-mutants-js.mjs` / `check-mutants-js.mjs`,17 个变异):
+**另外三半也上同一套门禁**(`make-mutants-js.mjs` / `check-mutants-js.mjs`,19 个变异):
 插件 / 面板 / 浏览器那三半的测试以前**从没被证明过**会不会失败。现在每个变异都指定
 "由哪个测试抓",逐条要求它变红:
 
@@ -213,7 +213,7 @@ caught   plugin-frozen-ignores-missing-heartbeat   (plugin-tests.mjs)
 caught   panel-ask-refreshes-immediately           (panel-tests.mjs)
 caught   client-hardcoded-color                    (check-client.mjs)
 ...
-17/17 个变异被抓到
+19/19 个变异被抓到
 ✓ 插件 / 面板 / 浏览器三半的测试确实会失败(不是永远绿的摆设)
 ```
 
@@ -248,19 +248,24 @@ caught   client-hardcoded-color                    (check-client.mjs)
 所以 `**粗体**` / 反引号 / `##` 要先变回纯文本(在两百多像素宽的框里,
 那些字符既占宽度又是噪音);超过 1200 字则**自述**截断并指路到 DSH。
 
-**面板半边同样有离线测试**(`panel-tests.mjs`,33 条断言):用一个假 SV 把
+**面板半边同样有离线测试**(`panel-tests.mjs`,36 条断言):用一个假 SV 把
 `DSHPanel.js` 真的加载起来,调它自己的 `getSidePanelSectionState()` 看交出来的 rows。
-它守的是面板**看不见**的两件事:
+它守的是面板**看不见**的三件事:
 
 - **文字会不会被截断** —— SV2 的侧栏很窄,按钮文案放不下就是被切掉,而"切掉"不报错。
   测试按最窄的侧栏算每个按钮的可用宽度,并算出**让所有按钮都不被截断所需的最小宽度**
-  (现在 ≈ **183px**,远小于真实侧栏)。
+  (现在 ≈ **122px**,远小于真实侧栏)。
 - **刷新时机** —— `refreshSidePanel()` 会重建面板、冲掉输入框焦点和没发出去的字
   (用户抱怨过"不要一直刷新,我没法打字")。这类 bug 只有"你正在打字时题目来了"才现形。
   现在这是断言:题目到达时**只挂待刷新标记**,等输入框干净了再由轮询那一拍去刷。
+- **版面顺序** —— 用户 2026-10-07 要求"选项下面加个小输入框":现在这是三条断言
+  (回复区 → 选项 → 小输入框;选项下面必须有"不满意就自己写"那行提示;选项在底部按钮之前)。
+  顺序这种东西**看一眼代码觉得对**,改别处时最容易悄悄错位 —— 所以钉住。
 
-它还钉住了面板的**自适应**:有选择题时日志框从 460 降到 170、快捷动作与一键调参收起 ——
-整块从 ≈662px 降到 ≈450px,题目与最多 8 个竖排选项在小侧栏里**不用滚**就能看全。
+它还钉住了面板的**自适应**:有选项时回复区从 300 降到 110、小输入框从 56 收到 44,
+把地方让给最多 6 个竖排选项 —— 整块从 ≈408px 变成 ≈362px,在小侧栏里**不用滚**就能看全。
+(2026-10-07 大改:快捷动作与一键调参都删了,面板只剩 状态行 · 回复区 · 选项 · 小输入框 ·
+三个按钮;用户原话"那些快捷方式可有可无了"。)
 
 **面板与桥之间那条通路**(project scriptData 两个键)也有测试(harness 的「面板中继」,
 20 条断言)。它守的是一个**安全设计**:面板**不能**调任意 op,只有一张白名单

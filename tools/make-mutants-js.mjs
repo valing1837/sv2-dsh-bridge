@@ -66,16 +66,31 @@ export const MUTANTS = [
       '      const frozen = frozenCrumb(hb)\n      if (false) {\n        nextSteps.push(']]],
 
   // ---- 面板半边(panel-tests.mjs)-----------------------------------------
+  // 2026-10-07 大改:快捷动作删了,旧的两条(日志不让位 / 答题时仍排快捷动作)
+  // 前者留、后者换成针对**新版面**的变异。
   ['panel-log-no-shrink',
-    '面板:有选择题时日志框不让位(460 顶着,题目与选项被挤到要滚)',
+    '面板:有选择题时回复区不让位(300 顶着,题目与选项被挤到要滚)',
     'panel', 'panel-tests.mjs',
     [['    var logHeight = asking ? PANEL.LOG_HEIGHT_ASK : PANEL.LOG_HEIGHT',
       '    var logHeight = PANEL.LOG_HEIGHT   // MUTANT: 不让位']]],
 
-  ['panel-keeps-quick-actions-while-asking',
-    '面板:答题期间仍把快捷动作排上去(跟选项抢这块很小的侧栏)',
+  ['panel-input-does-not-shrink',
+    '面板:答题时小输入框不收缩(该把地方让给选项的时候没让)',
     'panel', 'panel-tests.mjs',
-    [['    var quickRows = []\n    if (!asking) {', '    var quickRows = []\n    if (true) {   // MUTANT: 答题时也排']]],
+    [['    var inputHeight = asking ? PANEL.INPUT_HEIGHT_ASK : PANEL.INPUT_HEIGHT',
+      '    var inputHeight = PANEL.INPUT_HEIGHT   // MUTANT: 不收缩']]],
+
+  ['panel-drops-option-buttons',
+    '面板:助手推来的选项根本不渲染(用户只能自己打字,等于没有选项)',
+    'panel', 'panel-tests.mjs',
+    [['    if (asking) {\n      rows.push({ type: \'Label\', text: \'请选择:\' + st.ask.prompt })',
+      '    if (false) {   // MUTANT: 不渲染选项\n      rows.push({ type: \'Label\', text: \'请选择:\' + st.ask.prompt })']]],
+
+  ['panel-drops-custom-input-hint',
+    '面板:选项下面那行"不满意就自己写"没了(用户不知道还能自己写)',
+    'panel', 'panel-tests.mjs',
+    [["      rows.push({ type: 'Label', text: '不满意?在下面自己写:' })",
+      "      // MUTANT: 提示删了"]]],
 
   ['panel-ask-refreshes-immediately',
     '面板:题目一到就重建面板(冲掉用户正在输入框里打的字 —— 文件头纪律第 3 条)',
