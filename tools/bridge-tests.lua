@@ -331,6 +331,23 @@ end
 -- 桥的 clearModes **必须两种都能正确报告** —— 这就是那个开关存在的意义。
 function __T_setVoiceMerge(v) H.setVoiceMerge(v == true) end
 
+-- ---- 面板中继(0.8.5)------------------------------------------------------
+-- 面板与桥之间走 project scriptData 的两个键(`svdsh.panel.out` / `svdsh.panel.in`)。
+-- 这两个包装让测试能**直接扮演面板**:塞一条事件进去,看桥回什么。
+function __T_sdSet(k, v) return H.project:setScriptData(k, v) end
+function __T_sdGet(k)
+  local v = H.project:getScriptData(k)
+  return type(v) == "string" and v or ""
+end
+function __T_sdKeys()
+  local ks, out = H.project:getScriptDataKeys(), {}
+  for i = 1, #ks do
+    if tostring(ks[i]):sub(1, 12) == "svdsh.panel." then out[#out + 1] = ks[i] end
+  end
+  table.sort(out)
+  return table.concat(out, ",")
+end
+
 -- 属性的确定性序列化。
 -- ⚠️ 不能对表用 tostring:那给的是**内存地址**,同一个值两次快照可能不一样,
 --    "一个字节都没写"这条断言就会变成偶发红。逐音素属性数组正是个表

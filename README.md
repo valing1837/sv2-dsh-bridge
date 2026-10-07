@@ -5,7 +5,7 @@
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
-[![Tests](https://img.shields.io/badge/tests-46%2F46-brightgreen.svg)](tools/harness.mjs)
+[![Tests](https://img.shields.io/badge/tests-47%2F47-brightgreen.svg)](tools/harness.mjs)
 [![Mutants](https://img.shields.io/badge/mutants-66%2F66%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
 ---
@@ -124,7 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 ```bash
 cd tools
 npm install
-node harness.mjs           # 46 条行为测试
+node harness.mjs           # 47 条行为测试
 node check-mutants.mjs     # 66 个变异,漏一个就红
 node check-mutants-js.mjs  # 另外三半:12 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
@@ -177,7 +177,7 @@ node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(3
 
 ## 测试
 
-**46 条行为测试**,跑在一个离线装置上:
+**47 条行为测试**,跑在一个离线装置上:
 [fengari](https://github.com/fengari-lua/fengari)(纯 JS 的 Lua 5.4)执行真的桥代码,
 配一个假宿主(`tools/fake-sv.lua`),不需要开 SV2。
 
@@ -256,6 +256,15 @@ caught   client-hardcoded-color                    (check-client.mjs)
 
 它还钉住了面板的**自适应**:有选择题时日志框从 460 降到 170、快捷动作与一键调参收起 ——
 整块从 ≈662px 降到 ≈450px,题目与最多 8 个竖排选项在小侧栏里**不用滚**就能看全。
+
+**面板与桥之间那条通路**(project scriptData 两个键)也有测试(harness 的「面板中继」,
+20 条断言)。它守的是一个**安全设计**:面板**不能**调任意 op,只有一张白名单
+(只读 + 改本组声音属性),其余一律拒 —— 现在连"拒了之后音符一个没少"都是断言。
+
+> 顺带:0.8.5 把面板里那条**已经死掉的调参链路**删了(1012 → 721 行)。用户裁定
+> "不要滑条、不要预设"之后,那些控件再没被渲染过,回调永远不会触发 —— 死代码既没测试
+> 也没真机路径,留着只会让人以为"面板能直接调参"。**桥那边的白名单能力保留**,
+> 而且现在有测试守着,将来要加回控件直接 `emit({kind:'op', ...})` 即可。
 
 ---
 

@@ -113,6 +113,7 @@ const TESTS = [
   ['43', 'selftest: the full-chain self check'],
   ['44', 'snapshot + restore: the group-level layout'],
   ['45', 'voice layer: merge / clearModes / resetModes'],
+  ['46', 'panel relay: the direct-op whitelist'],
 ]
 
 const results = new Map()
@@ -2801,6 +2802,85 @@ function testVoiceLayer() {
 }
 
 // ---------------------------------------------------------------------------
+// test 46 — the panel relay: its direct-op whitelist (0.8.5)
+// ---------------------------------------------------------------------------
+// 面板与桥之间走 project scriptData 两个键。这条通路以前**没有任何测试** ——
+// 而它有一个安全设计:面板**不能**调任意 op,只有一张白名单(只读 + 改本组声音属性),
+// 其余一律拒。白名单漏一个,就是"误触代价太大"那件事真的会发生。
+function testPanelRelay() {
+  const c = checks()
+  resetWorld()
+
+  const sdSet = (k, v) => callGlobal(L, '__T_sdSet', [k, v])
+  const sdGet = (k) => callGlobal(L, '__T_sdGet', [k])
+  const OUT = 'svdsh.panel.out'
+  const IN = 'svdsh.panel.in'
+
+  /**
+   * 扮演面板:塞一条事件进去,把桥回的 JSON 解出来。
+   * ⚠️ 回执**可能隔一拍才落槽位**(桥那条链是先处理事件、下一拍才 flush),
+   *    所以这里先清槽位、再最多走 4 拍 —— 不能假设"一拍就回"。
+   */
+  const panelCall = (ev) => {
+    sdSet(IN, '')
+    sdSet(OUT, JSON.stringify(ev))
+    for (let i = 0; i < 4; i++) {
+      callGlobal(L, '__T_tick')
+      const back = sdGet(IN)
+      if (back) {
+        try { return JSON.parse(back) } catch { return { raw: back } }
+      }
+    }
+    return null
+  }
+
+  // (a) 白名单里的只读 op:能跑,而且结果真的回来了
+  const a = panelCall({ kind: 'op', op: 'get_context', args: {}, reqId: 'r-a' })
+  c.eq('(a) get_context 允许', a && a.ok, true)
+  c.eq('(a) reqId 原样带回', a && a.reqId, 'r-a')
+  c.eq('(a) ctl 标记是 opResult', a && a.ctl, 'opResult')
+  c.ok('(a) 结果里有工程信息', Boolean(a && a.result && typeof a.result.fileName === 'string'),
+    a && a.result)
+
+  // (b) 白名单里的写 op(改本组声音属性):真的写进宿主了
+  const b = panelCall({ kind: 'op', op: 'set_voice', args: { tension: 0.25 }, reqId: 'r-b' })
+  c.eq('(b) set_voice 允许', b && b.ok, true)
+  c.eq('(b) 宿主里确实写进去了',
+    JSON.parse(callGlobal(L, '__T_voiceRaw')).paramTension, 0.25)
+
+  // (c) 白名单外的 op:**必须拒**,而且不能有任何副作用
+  const before = callGlobal(L, '__T_notesState')
+  const c1 = panelCall({ kind: 'op', op: 'delete_notes', args: { indices: [0], expectGroupFp: 'x' }, reqId: 'r-c' })
+  c.eq('(c) delete_notes 被拒', c1 && c1.ok, false)
+  c.ok('(c) 错误里点名"不允许"', /不允许/.test((c1 && c1.error) || ''), c1 && c1.error)
+  c.eq('(c) 音符一个没少', callGlobal(L, '__T_notesState'), before)
+  const c2 = panelCall({ kind: 'op', op: 'nope', args: {}, reqId: 'r-c2' })
+  c.eq('(c) 不存在的 op 也被拒', c2 && c2.ok, false)
+
+  // (d) 白名单 ⊆ 真 op:每一条都跑得通(不然"没有这个 op"那条兜底就是空话)
+  for (const name of ['get_context', 'get_voice', 'set_voice', 'list_voice_presets', 'list_voices']) {
+    const r = panelCall({ kind: 'op', op: name, args: {}, reqId: `r-d-${name}` })
+    c.ok(`(d) 白名单里的 ${name} 是真实 op`,
+      Boolean(r) && !/没有这个 op/.test((r && r.error) || ''), r && r.error)
+  }
+
+  // (e) op 内部抛错 ⇒ 回 ok:false + 错误原文,桥自己不能崩
+  const e1 = panelCall({ kind: 'op', op: 'get_voice', args: { trackIndex: 99 }, reqId: 'r-e' })
+  c.eq('(e) 出错的 op 回 ok:false', e1 && e1.ok, false)
+  c.ok('(e) 带回了错误原文', typeof (e1 && e1.error) === 'string' && e1.error.length > 0, e1 && e1.error)
+
+  // (f) 面板的事件键**取走即删**(零残留:静止时 .svp 里不留本插件的东西)
+  c.eq('(f) panel.out 被取走了', sdGet(OUT), '')
+
+  // (g) 另一条活路:不是 op/status 的 kind 当聊天文本转发
+  const g1 = panelCall({ kind: 'input', text: '把这段歌词填进去' })
+  c.ok('(g) 聊天事件不产生 opResult', !g1 || g1.ctl !== 'opResult', g1)
+  c.eq('(g) panel.out 同样被取走', sdGet(OUT), '')
+
+  c.done('46', TESTS[46][1])
+}
+
+// ---------------------------------------------------------------------------
 // beyond-spec observations (NOT tests): printed as NOTE, never as a failure
 // ---------------------------------------------------------------------------
 
@@ -2976,6 +3056,7 @@ const PLAN = [
   ['43', testSelftest],
   ['44', testSnapshotLayout],
   ['45', testVoiceLayer],
+  ['46', testPanelRelay],
 ]
 
 function main() {
