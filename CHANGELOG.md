@@ -42,7 +42,8 @@
   只读 op、snapshot/restore 自己、`dryRun: 1` 不算真)。
 - 桥的变异 66 → **68**(`snapshot-drops-attrs` · `restore-skips-attrs`);另外三半 25 → **26**
   (`plugin-dryrun-takes-snapshot`)。
-- 假宿主补上 `getMusicalType` / `setMusicalType` / `getPitchAutoMode` / `setPitchAutoMode`
+- 桥版本 0.8.3 → **0.8.4**(桥脚本改了 —— 版本号随心跳上报,`sv_status` 里能确认你那边跑的是
+  哪一版桥;⚠️ 常驻脚本不热更,改完**必须重跑**)。`n- 假宿主补上 `getMusicalType` / `setMusicalType` / `getPitchAutoMode` / `setPitchAutoMode`
   (真机有,假宿主以前没有 ⇒ 属性层只能覆盖一半)。
 
 ---
