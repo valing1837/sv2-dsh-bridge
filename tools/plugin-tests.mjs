@@ -192,6 +192,10 @@ check('超长回复会截断', capped.length < long.length && capped.length < PA
 check('⚠️ 截断必须自述(说清还剩多少字、去哪儿看)',
   /还有 500 字/.test(capped) && /DSH/.test(capped), capped.slice(-60))
 check('不超长就不动它', capPanelText('短回复') === '短回复')
+// ⚠️ 用户 2026-10-07:"发给 sv2 的消息压缩一下,我难道还要两个程序来回切换吗?"
+//    上限就是"用户要不要切窗口"的那个数 ⇒ 不许悄悄涨回去。
+check('⚠️ 面板文本上限 ≤600(超过就得让用户切窗口读,那等于没发)',
+  PANEL_TEXT_MAX <= 600, PANEL_TEXT_MAX)
 
 console.log('\n— 随包文档:prompt 点名的文件必须真的在包里,且路径是算出来的')
 // 起因(2026-10-07,用户问"工作区清空对插件有没有影响"):prompt 里原本写的是

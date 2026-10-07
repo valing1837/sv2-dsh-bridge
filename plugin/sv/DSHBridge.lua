@@ -201,7 +201,13 @@ DSH ⇄ SV2 桥(常驻 Lua / 文件通道)  v0.1.0
 --            ⚠️ 只存宿主真给过的键 ⇒ 大多数音符这里是 nil,快照不会因此变胖。
 --            ⚠️ 比对是**单向包含**:宿主写回时会把"没写过"的键标记成"写过"(值其实一样),
 --               那是回滚动作的痕迹、不算错;但值不对一定报。
-local BRIDGE_VERSION = "0.8.4"
+--    0.8.5 = **`auto_pitch`(音高微表情)**。写 `pitchDelta` 曲线(单位音分,**相对**偏移):
+--            句尾下滑 / 大跳从对侧滑入 / 句中长音轻微下坠。规则在纯函数 `pitchPlan` 里
+--            (可用拍喂合成数据离线测)。
+--            ⚠️ 相对偏移 ⇒ **音符音高一点没动**;转录的音高/颤音/滑音全在 ✓。
+--            ⚠️ 与 `PitchControlCurve`(手画线,`get_pit`/`write_pit`)**不是一回事**:
+--               后者是替代、会盖掉转录 ⇒ 动手前先 get_pit 看有没有曲线。
+local BRIDGE_VERSION = "0.8.5"
 local PROTOCOL = 1
 
 local CFG = {
@@ -4450,6 +4456,168 @@ function OPS.auto_expression(args)
   }
 end
 
+-- auto_pitch 的**纯规则** —— 抽出来是为了能离线测(见 SVDSH_TEST.pitchPlan)。
+--
+-- ⚠️ 输入用**四分音符**为单位(不是 blick):① 测试能直接喂合成数据,不必经过宿主;
+--    ② 宿主那边的 blick 是 10 位数,而测试装置(假宿主)在 >2³¹ 的整数上会**32 位截断**
+--    (实测:5 拍 × 705600000 = 3528000000 ⇒ 变成 −1.087 拍)⇒ 用拍就不会踩到。
+--
+-- notes = { { at, dur, pitch }, ... }(at / dur 单位:四分音符)
+-- 返回 { points = { {at, value(音分)}, ... }, stat = { fall, slide, drift } }
+local function pitchPlan(notes, opts)
+  opts = opts or {}
+  local scale = opts.scale or 1.0
+  local fallMax = opts.fallMax or 60
+  local slideMax = opts.slideMax or 70
+  local driftMax = opts.driftMax or 25
+  local gapMin = opts.gapQuarter or 1.0
+
+  local sorted = {}
+  for i = 1, #notes do sorted[i] = notes[i] end
+  table.sort(sorted, function(a, b) return a.at < b.at end)
+
+  local pts = {}
+  local function push(at, cents)
+    if at < 0 then at = 0 end
+    pts[#pts + 1] = {
+      at = math.floor(at * 1000 + 0.5) / 1000,
+      value = math.floor(cents * scale * 10 + 0.5) / 10,
+    }
+  end
+
+  local stat = { fall = 0, slide = 0, drift = 0 }
+  for i = 1, #sorted do
+    local c = sorted[i]
+    local endQ = c.at + c.dur
+    local nxt = sorted[i + 1]
+    local gap = (nxt ~= nil) and (nxt.at - endQ) or nil
+
+    -- ① 句尾(含最后一个音)⇒ 尾音下滑;句中长音 ⇒ 轻微下坠。两者互斥(句尾优先)。
+    if (nxt == nil) or (gap ~= nil and gap >= gapMin) then
+      if c.dur >= 0.5 then
+        local lead = math.min(0.35, c.dur * 0.4)
+        push(endQ - lead, 0)      -- 先回 0,形状才成立(不是从上一个音一路滑下来)
+        push(endQ - 0.03, -fallMax)
+        stat.fall = stat.fall + 1
+      end
+    elseif c.dur >= 2 then
+      push(c.at + c.dur * 0.55, 0)
+      push(endQ - 0.15, -driftMax)
+      stat.drift = stat.drift + 1
+    end
+
+    -- ② 大跳到下一个音 ⇒ 到达前从**对侧**滑入(往上跳就从下方来,往下跳就从上方来)。
+    if nxt ~= nil and c.pitch ~= nil and nxt.pitch ~= nil then
+      local leap = nxt.pitch - c.pitch
+      if math.abs(leap) >= 4 then
+        local dir = (leap > 0) and -1 or 1
+        push(nxt.at - 0.28, 0)
+        push(nxt.at - 0.02, dir * slideMax)
+        stat.slide = stat.slide + 1
+      end
+    end
+  end
+
+  -- 同一位置**后者胜**(push 的顺序就是"先回零再到位",顺序有意义)
+  local seen, out = {}, {}
+  for i = #pts, 1, -1 do
+    local k = string.format("%.6f", pts[i].at)
+    if not seen[k] then seen[k] = true; out[#out + 1] = pts[i] end
+  end
+  table.sort(out, function(a, b) return a.at < b.at end)
+  return { points = out, stat = stat }
+end
+
+-- ---- auto_pitch ----------------------------------------------------------
+-- 按旋律生成**音高微表情** —— 写的是 `pitchDelta` 曲线(单位:**音分**)。
+--
+-- ⚠️ 用户 2026-10-07:"人唱歌是动态的,所以……只要是歌声面板和音符面板的东西你都应该用上。
+--    音高曲线你也应该用上。" ⇒ 音高也要有"人味":句尾的落、大跳前的滑、长音尾的松。
+--
+-- ⚠️⚠️ 为什么用 `pitchDelta`(**相对**)而不是 `get_pit`/`write_pit`(手画曲线):
+--    `pitchDelta` 是**加在音符音高之上**的音分偏移 ⇒ **非破坏性** —— 转录出来的音高、
+--    颤音、滑音全都在 ✓。手画曲线(PitchControlCurve)是**替代**,写下去转录的东西就没了。
+--    ⇒ 正确做法:**先 `get_pit` 看有没有手画曲线**。有 ⇒ 那是转录的宝贝,别乱动;
+--      没有(本工程 count=0)⇒ 用 pitchDelta 加表情是安全的。
+--
+-- ⚠️ 为什么在桥里算:480 个音符的 onset/pitch/duration 传回助手要 ~20KB,撑爆上下文;
+--    而"哪个音是句尾、哪一步是大跳"本来就是数据能算出来的。
+--
+-- 规则见 `pitchPlan`(句尾下滑 / 大跳从对侧滑入 / 句中长音轻微下坠)。
+--
+-- args: { groupIndex?, trackIndex?, scale?=1.0,
+--         fallMax?=60, slideMax?=70, driftMax?=25, gapQuarter?=1.0, dryRun?=true }
+function OPS.auto_pitch(args)
+  args = args or {}
+  local grp
+  if args.groupIndex ~= nil or args.trackIndex ~= nil then
+    local _, g2 = groupAt(args.trackIndex or 0, args.groupIndex or 0)
+    grp = g2
+  else
+    local _, g1 = currentGroup()
+    grp = g1
+  end
+  if grp == nil then error("找不到目标组") end
+  local n = num(call(grp, "getNumNotes")) or 0
+  if n == 0 then error("当前组没有音符") end
+
+  local QUARTER = tonumber(SV and SV.QUARTER) or 705600000
+  local notes = {}
+  for i = 1, n do
+    local nt = call(grp, "getNote", i)
+    if nt ~= nil then
+      notes[#notes + 1] = {
+        at = (num(call(nt, "getOnset")) or 0) / QUARTER,
+        dur = (num(call(nt, "getDuration")) or 0) / QUARTER,
+        pitch = num(call(nt, "getPitch")),
+      }
+    end
+  end
+
+  local plan = pitchPlan(notes, {
+    scale = tonumber(args.scale) or 1.0,
+    fallMax = tonumber(args.fallMax) or 60,
+    slideMax = tonumber(args.slideMax) or 70,
+    driftMax = tonumber(args.driftMax) or 25,
+    gapQuarter = tonumber(args.gapQuarter) or 1.0,
+  })
+  local planned = plan.points
+  local stat = plan.stat
+
+  local function stats(list)
+    if #list == 0 then return nil end
+    local mn, mx, sum, nz = list[1].value, list[1].value, 0, 0
+    for i = 1, #list do
+      local v = list[i].value
+      if v < mn then mn = v end
+      if v > mx then mx = v end
+      sum = sum + v
+      if v ~= 0 then nz = nz + 1 end
+    end
+    return { min = mn, max = mx, mean = math.floor(sum / #list * 10000 + 0.5) / 10000, nonZero = nz }
+  end
+
+  -- ⚠️ dry-run 也**先查范围**:值越界要在动宿主之前就知道(与 set_automation 同一条纪律)
+  local _, range = resolveAutomationRange({ type = "pitchDelta" })
+
+  if args.dryRun ~= false then
+    return {
+      dryRun = true, noteCount = #notes, pointCount = #planned,
+      stat = stat, stats = stats(planned),
+      rangeCents = range,
+      note = "只出计划。要真写把 dryRun 设为 false。写的是 pitchDelta(**相对**音分,不动音符音高)。",
+    }
+  end
+
+  local res = OPS.set_automation({ type = "pitchDelta", points = planned, closeShape = true,
+                                   trackIndex = args.trackIndex, groupIndex = args.groupIndex })
+  return {
+    dryRun = false, noteCount = #notes, pointCount = #planned,
+    stat = stat, stats = stats(planned),
+    written = res.written, closedShape = res.closedShape, rangeCents = res.range,
+  }
+end
+
 -- ---- check_lyrics --------------------------------------------------------
 -- 歌词体检:**只返回有问题的音符**,不返回全量。
 --
@@ -6084,6 +6252,8 @@ if type(SVDSH_TEST) == "table" then
   SVDSH_TEST.captureLayout = captureLayout
   SVDSH_TEST.restoreLayout = restoreLayout
   SVDSH_TEST.findLibraryGroupByUuid = findLibraryGroupByUuid
+  -- auto_pitch 的纯规则(喂合成音符 ⇒ 精确钉住"句尾 / 大跳 / 长音"三条规则)
+  SVDSH_TEST.pitchPlan = pitchPlan
   SVDSH_TEST.CFG = CFG
   SVDSH_TEST.ST = ST
   SVDSH_TEST.PATH = PATH

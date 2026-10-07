@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
+[![Ops](https://img.shields.io/badge/ops-47-blue.svg)](plugin/sv/DSHBridge.lua)
 [![Tests](https://img.shields.io/badge/tests-47%2F47-brightgreen.svg)](tools/harness.mjs)
 [![Mutants](https://img.shields.io/badge/mutants-68%2F68%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
@@ -30,7 +30,7 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 └──────────────────────────┘                          └──────────────────────────┘
 ```
 
-- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,46 个 op)和 JS(侧栏面板)
+- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,47 个 op)和 JS(侧栏面板)
 - **`plugin/`** —— 跑在 DSH 里的宿主插件(11 个工具 + 常驻提示词 + 输入框下的状态卡)
 
 没有网络通信:两边靠**固定文件名的轮询**交换 JSONL。
@@ -40,7 +40,7 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 
 ## 能做什么
 
-46 个 op,按用途分组:
+47 个 op,按用途分组:
 
 | 类别 | op |
 |---|---|
@@ -246,7 +246,7 @@ caught   client-hardcoded-color                    (check-client.mjs)
 现在"没有心跳就**不下这个结论**"也成了断言。
 它还管**发给面板的那份文本**:面板的 TextArea 不渲染 markdown,
 所以 `**粗体**` / 反引号 / `##` 要先变回纯文本(在两百多像素宽的框里,
-那些字符既占宽度又是噪音);超过 1200 字则**自述**截断并指路到 DSH。
+那些字符既占宽度又是噪音);上限 **500 字**(用户 2026-10-07:"我难道还要两个程序来回切换吗?")—— 超了会**自述**截断并指路到 DSH。
 
 **面板半边同样有离线测试**(`panel-tests.mjs`,46 条断言):用一个假 SV 把
 `DSHPanel.js` 真的加载起来,调它自己的 `getSidePanelSectionState()` 看交出来的 rows。

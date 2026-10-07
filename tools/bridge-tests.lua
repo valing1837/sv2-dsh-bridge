@@ -215,6 +215,23 @@ end
 function __T_pitch(i) return H.notes[i]:getPitch() end
 function __T_mutatePitch(i, delta) H.notes[i]:setPitch(H.notes[i]:getPitch() + delta) end
 function __T_setPitch(i, v) H.notes[i]:setPitch(v) end
+-- 往 **Main 组**加一个音符(onset / 时值以四分音符为单位)。
+-- ⚠️ 为什么不复用 write_notes 造旋律:它建的组带一个**奇怪的时间偏移**(实测 onset 会变成
+--    0.913 / −2.087 拍这种值),测试想精确控制"哪里是句尾、哪一步是大跳"就没法算。
+--    Main 组没有偏移,布点所见即所得。
+function __T_addNote(onsetQ, durQ, pitch)
+  return H.addNoteToMainGroup(tonumber(onsetQ), tonumber(durQ), tonumber(pitch), "")
+end
+
+-- auto_pitch 的**纯规则**探针:喂合成音符(单位:**四分音符**),拿回计划与统计。
+-- ⚠️ 为什么不经过宿主:假宿主在 >2³¹ 的整数上会 **32 位截断**(实测 5 拍 × 705600000
+--    ⇒ 变成 −1.087 拍),而这三条规则只跟"拍"和"音高"有关 ⇒ 直接喂拍最干净、也最准。
+function __T_pitchPlan(json, optsJson)
+  local opts = nil
+  if type(optsJson) == "string" and #optsJson > 0 then opts = T.jdec(optsJson) end
+  local plan = T.pitchPlan(T.jdec(json), opts)
+  return T.jenc({ points = plan.points, stat = plan.stat })
+end
 
 function __T_opsrun() return T.ST.opsRun end
 function __T_reqseen() return T.ST.reqSeen end
