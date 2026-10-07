@@ -50,7 +50,7 @@
  */
 
 var PANEL = {
-  VERSION: '0.6.1',
+  VERSION: '0.6.2',
   K: {
     out: 'svdsh.panel.out', // 面板 → 桥(桥消费后立即删)
     in: 'svdsh.panel.in', // 桥 → 面板(面板消费后立即删)
@@ -245,12 +245,15 @@ function renderLog() {
   if (st.waiting) parts.push('· 已发送,等待 DSH 回复…')
   for (var i = 0; i < st.log.length; i++) {
     var e = st.log[i]
-    if (e.who === 'you') continue // 你自己说的话不进回复区
+    // ⚠️ 你自己**打字**说的不进这个框(用户 2026-10-02:"你自己说的话不进这个框")。
+    //    但**点选的选项**要显示 —— 用户 2026-10-07:"我选完选项以后,在你的回答框里面
+    //    显示我选的选项" ⇒ 所以这里按 picked 标记区分,不是一刀切。
+    if (e.who === 'you' && !e.picked) continue
     if (parts.length > 0) parts.push('')
     // ⚠️ 分隔行要**短**:侧栏很窄,原来那行 `======== 12:34 ========` 有 22 个字符,
     //    在这么窄的面板里等于白占一整行(用户 2026-10-07 提醒过"框挺小的")。
     parts.push('[' + hhmm(e.at) + ']')
-    parts.push(e.text)
+    parts.push(e.picked ? '你选:' + e.text : e.text)
   }
   var text = parts.length
     ? parts.join('\n')
@@ -530,7 +533,11 @@ for (var ai = 0; ai < wAsk.length; ai++) {
             var pick = st.ask.choices[idx]
             if (pick === undefined) return
             st.ask = null
-            logPush('you', pick)
+            // ⚠️ 用户 2026-10-07:"我选完选项以后,在你的回答框里面显示我选的选项"。
+            //    ⇒ 把"我选的"写进回复区,并且**替换**掉那一大段"题目 + 选项列表"
+            //      (留着会把回复区刷满,而且你已经选完了,列表没用了)。
+            //    带 picked 标记:renderLog 只显示**点选**的,不显示自由打字的那些。
+            st.log = [{ who: 'you', text: String(pick), picked: true, at: Date.now() }]
             emit('input', { text: pick })
             st.waiting = true
             renderLog()
