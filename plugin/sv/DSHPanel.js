@@ -46,31 +46,34 @@
  *    `SV.refreshSidePanel()` 会重建整个面板、冲掉输入框焦点。
  *    ⇒ 只有**结构变化**才刷新;纯文本更新走 `WidgetValue.setValue`;
  *      输入框里有没发出去的字时,一律推迟刷新 —— 包括"题目来了"这种结构变化,
- *      它只挂 `st.askNeedsRefresh`,由轮询那一拍在输入框干净时才真的刷。
+ *      它只挂 `st.needsRefresh`,由轮询那一拍在输入框干净时才真的刷。
  */
 
 var PANEL = {
-  VERSION: '0.6.0',
+  VERSION: '0.6.1',
   K: {
     out: 'svdsh.panel.out', // 面板 → 桥(桥消费后立即删)
     in: 'svdsh.panel.in', // 桥 → 面板(面板消费后立即删)
   },
   POLL_MS: 500,
-  // 回复区高度。2026-10-07 大改:快捷动作删掉之后,面板不用再跟它们抢地方,
-  // 而用户这次要的是"分区清楚、整体收紧" ⇒ 从 460 收到 300(仍够看一条长回复)。
-  LOG_HEIGHT: 300,
-  // 有选项时把地方让给选项(用户 2026-10-07:"侧栏的框挺小的")。
-  // 选项最多 8 个竖排、每个 28px ⇒ 224px;日志只留够看题目的一句半。
-  LOG_HEIGHT_ASK: 110,
-  // 小输入框:用户这次明确要"**小**输入框" ⇒ 空闲 56(两三行)、有选项时 44(两行)。
+  // ── 回复区:纯文字(Label 行)────────────────────────────────────────────
+  // ⚠️ 为什么不用 TextArea:宿主**没有"只读文本"这个字段**。
+  //    官方的控件示例里只有 type / value / height / width / text —— 我们和参考项目
+  //    都写过 `readOnly: true`,但那是**猜的**:用户 2026-10-07 实测"回复框里也能打字"
+  //    ⇒ 这个字段在 SV2 2.3.0 上不起作用。Label 是纯文字,**天生不可编辑** ⇒ 用它。
+  //    代价:Label 的 text 是**静态**的 ⇒ 回复变了必须重建面板(见 st.needsRefresh),
+  //    不能像 WidgetValue 那样只改值。这是 API 逼出来的取舍。
+  REPLY_COLS: 22, // 自己折行(不赌宿主会不会自动折)
+  REPLY_LINES: 9, // 空闲时最多显示几行
+  REPLY_LINES_ASK: 4, // 有选项时让位给选项
+  // 小输入框:用户 2026-10-07 明确要"**小**输入框" ⇒ 空闲 56(两三行)、有选项时 44(两行)。
   INPUT_HEIGHT: 56,
   INPUT_HEIGHT_ASK: 44,
   // 最多渲染几个选项按钮。
   // ⚠️ 用户 2026-10-02 说过"最多 8 个竖排",但 2026-10-07 又要"界面好看、整体收紧":
-  //    6 个 × 宿主默认按钮高(≈34px)≈ 204px,加上日志/输入/按钮刚好不滚;
+  //    6 个 × 宿主默认按钮高(≈34px)≈ 204px,加上回复/输入/按钮刚好不滚;
   //    8 个就要滚了。**超出的选项不会丢** —— 回复区里有全文,小输入框也能直接回。
   MAX_CHOICES: 6,
-  LOG_MAX: 20000, // 只截内存里的显示,不落盘
   LOG_KEEP: 60, // 最多留几条(每条可能很长,条数比字节数更该管)
   // 多久自动问一次"桥还在不在"。
   // 这是**唯一**的周期性 scriptData 活动:一条 key,面板取走后立刻删除,零残留。
@@ -78,7 +81,6 @@ var PANEL = {
   STATUS_MS: 20000,
 }
 
-var wLog = SV.create('WidgetValue')
 var wInput = SV.create('WidgetValue')
 var wSend = SV.create('WidgetValue')
 var wRefresh = SV.create('WidgetValue')
@@ -119,9 +121,11 @@ var st = {
   //    所以助手要决策时不是问一句开放题,而是**推一组按钮**过来点。
   ask: null, // {id, prompt, choices[]} 或 null
   askAt: 0,
-  // 结构变了(题目来 / 选项被点掉)但**还没重建面板**。等输入框干净了再由 step() 刷 ——
-  // 直接刷会冲掉用户正在打的字(文件头第 22-25 行的纪律)。
-  askNeedsRefresh: false,
+  // 回复区的**纯文字行**(Label 用;见 renderLog 的说明)。
+  replyLines: [],
+  // 结构变了(回复变了 / 题目来 / 选项被点掉)但**还没重建面板**。
+  // 纯文字是静态的 ⇒ 改它只能靠重建;而重建会冲掉输入框焦点,所以**等输入框干净**再刷。
+  needsRefresh: false,
 }
 
 var outQueue = [] // 面板 → 桥的待发事件(桥还没取走时先攒着,避免互相覆盖)
@@ -201,44 +205,59 @@ function hhmm(ms) {
 }
 
 /**
- * 渲染日志。
+ * 把一段文本折成"面板能显示的行"。
  *
- * ⚠️ **倒序(最新在最上面)** —— 这不是审美选择,是被宿主逼出来的:
- *    TextArea 每次 setValue 都会把滚动条**拉回顶部**,而我们**没有任何 API** 能控制它。
- *    正序时你一发消息就被甩到"历史第一句话"(用户原话),看不到刚说的那句。
- *    倒序之后,"被拉回顶部"**正好等于看到最新的那条** ✓
- *    顺带还解决了"难找到一句话的开头" —— 长消息的开头就在最上面。
+ * ⚠️ **自己折行**,不赌宿主会不会自动折 —— 官方的 Label 示例只有一行短文字,
+ *    没有任何"会自动折行"的承诺。折行宽度按侧栏最窄的情况给(REPLY_COLS)。
+ * ⚠️ 超过 maxLines 就**截断 + 自述**:最后一行换成"后面还有 N 行,完整在 DSH"。
+ *    这是"如实"而不是"悄悄少几行" —— 用户得知道去哪儿看剩下的。
+ */
+function wrapForPanel(text, cols, maxLines) {
+  var src = String(text === undefined || text === null ? '' : text).split('\n')
+  var out = []
+  for (var i = 0; i < src.length; i++) {
+    var line = src[i]
+    if (line.length === 0) {
+      out.push('')
+      continue
+    }
+    for (var at = 0; at < line.length; at += cols) out.push(line.substr(at, cols))
+  }
+  var total = out.length
+  if (total > maxLines) {
+    out = out.slice(0, maxLines)
+    out[maxLines - 1] = '…(后面还有 ' + (total - maxLines + 1) + ' 行,完整在 DSH 看)'
+  }
+  return out.length ? out : ['']
+}
+
+/**
+ * 渲染回复区(纯文字)。
  *
- * ⚠️ 另一个修的是**根本性的 bug**:原来 send() 只把消息发出去、**根本没记进日志**,
- *    所以框里只有 DSH 的话 —— 难怪"分不清谁说的"。现在两边都记,而且带发言人标记。
+ * ⚠️ 用户 2026-10-02 的裁决:"别从下往上了,改回从上往下,并且回复前清空历史消息,
+ *    反正原历史在 dsh 上面" ⇒ ① 正序;② **每次回复前清空** —— 面板里永远只有
+ *    **当前这一条**,不和旧消息混。完整历史在 DSH 那边看。
+ * ⚠️ 也不要用 emoji:SV2 的侧栏字体不渲染,会显示成乱码(用户实测)。
+ * ⚠️ 纯文字是**静态**的 ⇒ 这里必须挂 needsRefresh,由 step() 在输入框干净时重建面板。
  */
 function renderLog() {
-  // ⚠️ 用户 2026-10-02 的最终裁决(推翻了我之前的倒序方案):
-  //    "别从下往上了,改回从上往下,并且回复前清空历史消息,反正原历史在 dsh 上面"
-  //    ⇒ ① **正序**(从上往下读,和正常文字一样)
-  //      ② **每次回复前清空** —— 框里永远只有**当前这一条**,不会和旧消息混在一起
-  //         (这才是"都挤一块了,还和前面的消息混一起"的真正解法:
-  //          不是调整顺序,而是**根本不留旧的**。完整历史在 DSH 那边看。)
-  // ⚠️ 也不要用 emoji:SV2 的侧栏字体不渲染,会显示成乱码(用户实测)。
   var parts = []
   if (st.waiting) parts.push('· 已发送,等待 DSH 回复…')
   for (var i = 0; i < st.log.length; i++) {
     var e = st.log[i]
-    if (e.who === 'you') continue // 你自己说的话不进这个框
+    if (e.who === 'you') continue // 你自己说的话不进回复区
     if (parts.length > 0) parts.push('')
     // ⚠️ 分隔行要**短**:侧栏很窄,原来那行 `======== 12:34 ========` 有 22 个字符,
-    //    在这么窄的框里等于白占一整行(用户 2026-10-07 提醒过"框挺小的")。
+    //    在这么窄的面板里等于白占一整行(用户 2026-10-07 提醒过"框挺小的")。
     parts.push('[' + hhmm(e.at) + ']')
     parts.push(e.text)
   }
   var text = parts.length
     ? parts.join('\n')
-    : '(这里显示 DSH 的回复。在下面输入一句话发给它。)'
-  try {
-    wLog.setValue(text)
-  } catch (e2) {
-    /* 忽略 */
-  }
+    : '(这里显示 DSH 的回复。在下面选一个,或者自己写一句。)'
+  var maxLines = st.ask ? PANEL.REPLY_LINES_ASK : PANEL.REPLY_LINES
+  st.replyLines = wrapForPanel(text, PANEL.REPLY_COLS, maxLines)
+  st.needsRefresh = true
 }
 
 function statusLine() {
@@ -362,9 +381,9 @@ function pull() {  try {
         renderLog()
         // 选项出现/消失会改行数 ⇒ 需要重建面板。
         // ⚠️ 但**不能在这里直接重建**:用户可能正在输入框里打字,`refreshSidePanel()`
-        //    会连焦点带没发出去的字一起冲掉 —— 这正是文件头第 22-25 行的纪律
+        //    会连焦点带没发出去的字一起冲掉 —— 这正是文件头那条纪律
         //    (「不要一直刷新,我没法打字」)。⇒ 交给 step():输入框干净时它才真的刷。
-        st.askNeedsRefresh = true
+        st.needsRefresh = true
         return true
       }
       // 不是控制消息 ⇒ 当普通文本继续往下走
@@ -437,11 +456,12 @@ function step() {
   } catch (e) {
     /* 忽略 */
   }
-  // 结构变化(来了一道选择题 / 用户点掉了选项)要重建面板 —— 但**只在输入框干净时**。
-  // 用户正在打字就等着,下一拍再看;这样"题目来了"永远不会吃掉没发出去的字。
+  // 结构变化(回复变了 / 来了一道选择题 / 用户点掉了选项)要重建面板 ——
+  // 但**只在输入框干净时**。用户正在打字就等着,下一拍再看;
+  // 这样"回复来了"和"题目来了"都永远不会吃掉没发出去的字。
   try {
-    if (st.askNeedsRefresh && !inputDirty()) {
-      st.askNeedsRefresh = false
+    if (st.needsRefresh && !inputDirty()) {
+      st.needsRefresh = false
       refresh()
     }
   } catch (e) {
@@ -515,7 +535,7 @@ for (var ai = 0; ai < wAsk.length; ai++) {
             st.waiting = true
             renderLog()
             // 同上:选项要消失,但重建面板得等输入框干净(别吃掉用户打的字)
-            st.askNeedsRefresh = true
+            st.needsRefresh = true
           } catch (e) {
             /* 忽略 */
           }
@@ -545,7 +565,7 @@ function getClientInfo() {
 /**
  * 面板版面(2026-10-07 大改后的顺序,**从上到下**):
  *   ① 状态行(一行,极短)
- *   ② 回复区(只显示最近一条回复)
+ *   ② 回复区(**纯文字**,一行一个 Label —— 天生不可编辑)
  *   ③ 有选项时:题目 → 选项(竖排、一行一个)→ "不满意?在下面自己写:" 提示
  *   ④ 小输入框(有选项时更矮)
  *   ⑤ [发送][刷新][清空]
@@ -559,17 +579,17 @@ function getSidePanelSectionState() {
   var rows = []
   try {
     var asking = !!(st.ask && st.ask.choices && st.ask.choices.length > 0)
-    var logHeight = asking ? PANEL.LOG_HEIGHT_ASK : PANEL.LOG_HEIGHT
     var inputHeight = asking ? PANEL.INPUT_HEIGHT_ASK : PANEL.INPUT_HEIGHT
 
     // ① 状态行
     rows.push({ type: 'Label', text: statusLine() })
 
-    // ② 回复区(只读;内容由 renderLog() 维护)
-    rows.push({
-      type: 'Container',
-      columns: [{ type: 'TextArea', value: wLog, height: logHeight, width: 1.0, readOnly: true }],
-    })
+    // ② 回复区:**纯文字**(一行一个 Label)⇒ 天生不可编辑。
+    //    为什么不用 TextArea:宿主没有"只读"字段(见 PANEL 那段注释)。
+    var reply = st.replyLines && st.replyLines.length ? st.replyLines : ['']
+    for (var r2 = 0; r2 < reply.length; r2++) {
+      rows.push({ type: 'Label', text: reply[r2] })
+    }
 
     // ③ 选项区:助手推来的选择题 ⇒ 竖排按钮,一行一个
     if (asking) {
@@ -613,6 +633,8 @@ function getSidePanelSectionState() {
   try {
     st.lastStatus = statusLine()
     renderLog()
+    // ⚠️ 面板正在用这些行构建 ⇒ 把"待刷新"清掉,别让第一拍白刷一次。
+    st.needsRefresh = false
     // 立刻 ping 一次,确认桥在不在(桥的应答走 svdsh.panel.in,读走即删)
     st.lastPingAt = Date.now()
     st.pingSentAt = st.lastPingAt

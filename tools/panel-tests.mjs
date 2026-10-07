@@ -137,10 +137,22 @@ const idle = ctx.getSidePanelSectionState()
 check('返回 {title, rows} 且 title 纯 ASCII',
   /^[\x20-\x7e]+$/.test(idle.title) && Array.isArray(idle.rows), idle.title)
 const idleAreas = areasOf(idle)
-check('有回复区与输入框', idleAreas.length >= 2, idleAreas.length)
-check('回复区是 readOnly(只放 DSH 的回复)', idleAreas[0].readOnly === true)
-check('回复区高 300(快捷动作删掉后收紧到这个高度)', idleAreas[0].height === 300, idleAreas[0].height)
-check('小输入框高 56(用户要的是"小"输入框)', idleAreas[1].height === 56, idleAreas[1].height)
+// ⚠️⚠️ 这一条是 2026-10-07 那次 bug 的判据(用户实测"回复框里也能打字")。
+//      当时我写的是 `readOnly: true` —— 而**宿主没有这个字段**(官方控件示例里只有
+//      type / value / height / width / text)。旧断言检查的是"我设了这个标志",
+//      不是"用户改不了" ⇒ 它永远是绿的,抓不到这个 bug。
+//      现在换成**行为判据**:整个面板只能有**一个**可编辑的文本控件(那个小输入框)。
+check('⚠️ 整个面板只有**一个**可编辑的文本控件(那个小输入框)',
+  idleAreas.length === 1, idleAreas.map((a) => a.height))
+check('小输入框高 56(用户要的是"小"输入框)', idleAreas[0].height === 56, idleAreas[0].height)
+check('回复区是**纯文字**(Label 行),不是输入框', labelsOf(idle).length > 0, labelsOf(idle).length)
+// 源码级:不许再出现 readOnly(写了只会让人**以为**只读)。注释里提到它是解释历史,剥掉。
+const panelSrc = fs.readFileSync(PANEL_FILE, 'utf8')
+const panelCode = panelSrc
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1')
+check('源码里不再出现 readOnly(宿主不认这个字段)',
+  !/readOnly/.test(panelCode), (panelCode.match(/.*readOnly.*/) || [''])[0])
 // ⚠️ 用户 2026-10-07:"那些快捷方式可有可无了" ⇒ 面板只剩 发送/刷新/清空 三个按钮。
 const idleButtons = buttonsOf(idle).map((b) => b.text)
 check('只剩 发送 / 刷新 / 清空 三个按钮', idleButtons.length === 3, idleButtons)
@@ -183,12 +195,13 @@ check('题目/选项同时写进了日志框(按钮要重建才出现,文字一�
   ctx.st.log.length > 0 && /请选择/.test(ctx.st.log[0].text))
 check('⚠️ 题目来了**没有**当场重建面板(那会冲掉用户正在打的字)',
   log.refreshes === before, { before, after: log.refreshes })
-check('而是挂了个"待刷新"标记', ctx.st.askNeedsRefresh === true)
+check('而是挂了个"待刷新"标记', ctx.st.needsRefresh === true)
 
 const ask = ctx.getSidePanelSectionState()
 const askAreas = areasOf(ask)
-check('有题目时回复区让位(300 → 110)', askAreas[0].height === 110, askAreas[0].height)
-check('有题目时小输入框更矮(56 → 44,把地方让给选项)', askAreas[1].height === 44, askAreas[1].height)
+check('有题目时仍然只有一个可编辑控件', askAreas.length === 1, askAreas.length)
+check('有题目时小输入框更矮(56 → 44,把地方让给选项)', askAreas[0].height === 44, askAreas[0].height)
+check('有题目时回复区让位(最多 9 行 → 4 行)', ctx.st.replyLines.length <= 4, ctx.st.replyLines.length)
 const optionRows = rowsOf(ask).filter((r) => r.type === 'Container' && r.columns.length === 1 &&
   r.columns[0].type === 'Button' && !/发送|刷新|清空/.test(r.columns[0].text))
 check('4 个选项**竖排、一行一个**(用户明确要求,并排会把文字挤窄)',
@@ -201,38 +214,54 @@ check('选项文字也在标签区重复了一遍(按钮被截断也看得到全
 const rowIndexOf = (state, pred) => rowsOf(state).findIndex(pred)
 const isInputRow = (r) => r.type === 'Container' && r.columns.length === 1 &&
   r.columns[0].type === 'TextArea' && r.columns[0].value === ctx.wInput
-const isLogRow = (r) => r.type === 'Container' && r.columns.length === 1 &&
-  r.columns[0].type === 'TextArea' && r.columns[0].value === ctx.wLog
 const inputRow = rowIndexOf(ask, isInputRow)
-const logRow = rowIndexOf(ask, isLogRow)
+// 回复区现在是纯文字:第一行状态行之后、题目之前的那批 Label 就是它。
+const askLabelRow = rowIndexOf(ask, (r) => r.type === 'Label' && /^请选择:/.test(r.text || ''))
 const lastOptionRow = rowsOf(ask).reduce(
   (n, r, i) => (r.type === 'Container' && r.columns.length === 1 && r.columns[0].type === 'Button' &&
     !/发送|刷新|清空/.test(r.columns[0].text) ? i : n), -1)
 const hintRow = rowIndexOf(ask, (r) => r.type === 'Label' && /不满意/.test(r.text || ''))
-check('版面顺序:回复区 → 选项 → 小输入框',
-  logRow >= 0 && lastOptionRow > logRow && inputRow > lastOptionRow,
-  { logRow, lastOptionRow, inputRow })
+check('版面顺序:回复(纯文字) → 选项 → 小输入框',
+  askLabelRow > 1 && lastOptionRow > askLabelRow && inputRow > lastOptionRow,
+  { askLabelRow, lastOptionRow, inputRow })
 check('选项**下面**有一行"不满意就自己写"的提示(就在输入框上面)',
   hintRow > lastOptionRow && hintRow < inputRow, { lastOptionRow, hintRow, inputRow })
 check('选项按钮在发送按钮那一行**之前**(选项不是压在底部按钮下面)',
   lastOptionRow < rowIndexOf(ask, (r) => r.type === 'Container' && r.columns.some((c) => c.text === '发送')),
   lastOptionRow)
 
-// ⚠️ 判据是**总高度**,不是行数:题目会让行数变多(选项一行一个),
-//    但日志让出了 290px —— 在这么窄的侧栏里,决定"要不要滚"的是总高度。
+// ⚠️ 判据变了(2026-10-07 回复区改纯文字之后):
+//    旧的"有题目时整块更矮"是给**固定高度的日志框**设计的 —— 那时日志让出 290px,
+//    总高当然变小。现在回复是**文字行**、选项是**新增的行** ⇒ 有题目时总高必然更大 ✓,
+//    所以"更矮"这个比较已经不成立。真正该钉的是:**同样的回复内容,有题目时行数更少**。
 const ROW_PX = 26
-const totalHeight = (state) => rowsOf(state).reduce((n, r) => {
+const totalHeight = (state) => rowsOf(state).forEach ? rowsOf(state).reduce((n, r) => {
   if (r.type === 'Container' && r.columns.length === 1 && r.columns[0].type === 'TextArea') {
     return n + (r.columns[0].height || ROW_PX)
   }
   return n + ROW_PX
-}, 0)
+}, 0) : 0
 const hIdle = totalHeight(idle)
 const hAsk = totalHeight(ask)
-console.log(`  [--]   估算总高:空闲 ${hIdle}px · 有题目 ${hAsk}px(差 ${hIdle - hAsk}px)`)
-check('有题目时整块**更矮**(把高度让给了题目与选项)', hAsk < hIdle, { hIdle, hAsk })
+console.log(`  [--]   估算总高:空闲 ${hIdle}px · 有题目 ${hAsk}px(有题目时多了选项那几行)`)
 check('有题目时能塞进一个典型侧栏高度(≤560px,不用滚就能看全题目与选项)',
   hAsk <= 560, hAsk)
+
+// 公平比较:同一段回复,在"空闲"和"有题目"两种状态下各渲染一次
+const savedAsk = ctx.st.ask
+const savedLog = ctx.st.log
+ctx.st.log = [{ who: 'dsh', text: '第一行\n第二行\n第三行\n第四行\n第五行\n第六行', at: Date.now() }]
+ctx.st.ask = null
+ctx.renderLog()
+const idleReplyLines = ctx.st.replyLines.length
+ctx.st.ask = { id: 'x', prompt: 'p', choices: ['a', 'b'] }
+ctx.renderLog()
+const askReplyLines = ctx.st.replyLines.length
+check('同一段回复:有题目时**行数更少**(把地方让给选项)',
+  askReplyLines < idleReplyLines, { idleReplyLines, askReplyLines })
+ctx.st.ask = savedAsk
+ctx.st.log = savedLog
+ctx.renderLog()
 
 // 输入框干净之后,step() 才真的重建
 const refreshesBefore = log.refreshes
@@ -240,30 +269,43 @@ ctx.step()
 check('输入框干净 ⇒ step() 完成那次重建', log.refreshes === refreshesBefore + 1, log.refreshes)
 
 // 正在打字时:不许刷
-ctx.st.askNeedsRefresh = true
-const typed = ctx.SV.create('WidgetValue')
+ctx.st.needsRefresh = true
 ctx.wInput.setValue('我正在打字')
 const r2 = log.refreshes
 ctx.step()
 check('输入框里有字 ⇒ 即便有待刷新也不动面板(不冲掉焦点)',
   log.refreshes === r2, { before: r2, after: log.refreshes })
-check('标记留着,等下一拍', ctx.st.askNeedsRefresh === true)
+check('标记留着,等下一拍', ctx.st.needsRefresh === true)
 ctx.wInput.setValue('')
 
 // ---------------------------------------------------------------------------
-console.log('\n— 日志框里放什么')
+console.log('\n— 回复区里放什么(纯文字行)')
 ctx.st.log = [{ who: 'you', text: '我自己说的话', at: Date.now() },
               { who: 'dsh', text: 'DSH 的回复', at: Date.now() }]
 ctx.renderLog()
-const shown = ctx.wLog.getValue()
+const lines = ctx.st.replyLines
+check('回复渲染成了纯文字行', Array.isArray(lines) && lines.length > 0, lines)
+const shown = lines.join('\n')
 check('只显示 DSH 的回复,不回显用户自己的话', !/我自己说的话/.test(shown), shown)
 check('时间戳是**短**分隔行(原来 22 个字符的装饰行等于白占一行)',
-  /^\[\d\d:\d\d\]$/m.test(shown), shown.split('\n')[0])
+  lines.some((t) => /^\[\d\d:\d\d\]$/.test(t)), lines)
 check('回复正文在', /DSH 的回复/.test(shown))
+check('⚠️ 回复变了会挂"待刷新"(纯文字是静态的,不重建就看不到)',
+  ctx.st.needsRefresh === true)
+check('每行不超过折行宽度(不赌宿主会自动折行)',
+  lines.every((t) => t.length <= 22), Math.max(...lines.map((t) => t.length)))
+
+// 长回复:截断 + **自述**(不能悄悄少几行)
+ctx.st.log = [{ who: 'dsh', text: '很长的一句话,一直说下去。'.repeat(60), at: Date.now() }]
+ctx.renderLog()
+const longLines = ctx.st.replyLines
+check('长回复被截断到上限', longLines.length <= 9, longLines.length)
+check('⚠️ 而且**自述**还有多少行、去哪儿看',
+  /后面还有 \d+ 行/.test(longLines[longLines.length - 1]), longLines[longLines.length - 1])
 
 console.log('')
 if (failed === 0) {
-  console.log('OK: 面板半边全部通过(结构 / 最窄宽度 / 选择题让位 / 刷新纪律 / 日志)')
+  console.log('OK: 面板半边全部通过(结构 / 最窄宽度 / 唯一可编辑控件 / 版面顺序 / 刷新纪律 / 回复)')
   process.exit(0)
 }
 console.log(`${failed} 项失败`)
