@@ -5,8 +5,8 @@
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
-[![Tests](https://img.shields.io/badge/tests-44%2F44-brightgreen.svg)](tools/harness.mjs)
-[![Mutants](https://img.shields.io/badge/mutants-58%2F58%20caught-brightgreen.svg)](tools/check-mutants.mjs)
+[![Tests](https://img.shields.io/badge/tests-45%2F45-brightgreen.svg)](tools/harness.mjs)
+[![Mutants](https://img.shields.io/badge/mutants-62%2F62%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
 ---
 
@@ -58,11 +58,16 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 
 - **`snapshot` / `restore`** —— **写错了能回去**。每个改音符的写操作之前,插件会自动留一份
   组状态;写出来的东西"合法但不对"时,一句 `sv_undo` 回到写之前,不用手工反向改。
-  覆盖音符层(起始 / 时值 / 音高 / 歌词),**不含**属性层、组的增删、自动化曲线和声音属性 ——
-  这些在返回里逐条写明,免得以为它能救一切。目标组按快照里的 **UUID 全局找**,
-  所以你中途切到别的组了也能回滚对。
+  覆盖两层:
+  - **音符层**:起始 / 时值 / 音高 / 歌词;
+  - **编排布局**:哪条轨挂了哪些组、顺序、时间范围与时间/音高偏移 ⇒ **新建的组会被摘掉、
+    删掉的组会被挂回来、挪到别的轨的组会被挪回来**。
+
+  **不含**:属性层(音素 / detune / attributes)、组库里的孤儿数据、自动化曲线、声音属性、
+  速度与拍号标记 —— 这些在返回里逐条写明,免得以为它能救一切。目标组按快照里的
+  **UUID 全局找**,所以你中途切到别的组了也能回滚对。主组与外部音频引用**一律不碰**。
 - **`selftest`** —— 全链路自检:目录可写 · 原子替换 · 读回 · 删除 · 心跳 · 日志 ·
-  计时链 · 宿主与工程可读 · 快照存储,逐项给 ok/detail。
+  计时链 · 宿主与工程可读 · 快照存储 · **组库可读**(撤销"删组"要靠它),逐项给 ok/detail。
   「桥不在线」有七八种原因(没跑 / 被关 / 两端目录不一致 / 心跳过期 / 被模态框冻住…),
   用户在聊天里描述不出来 —— 让桥自己验一遍,DSH 侧的 `sv_doctor` 就能给一句能照做的结论。
 - **`get_summary`** —— 只回统计量。500 个音符的明细有 20~50 KB,会把调用方的上下文冲垮;
@@ -119,8 +124,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 ```bash
 cd tools
 npm install
-node harness.mjs           # 44 条行为测试
-node check-mutants.mjs     # 58 个变异,漏一个就红
+node harness.mjs           # 45 条行为测试
+node check-mutants.mjs     # 62 个变异,漏一个就红
 node check-mutants-js.mjs  # 另外三半:12 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
@@ -172,11 +177,11 @@ node panel-tests.mjs       # 面板半边:布局 / 最窄侧栏 / 刷新纪律(3
 
 ## 测试
 
-**44 条行为测试**,跑在一个离线装置上:
+**45 条行为测试**,跑在一个离线装置上:
 [fengari](https://github.com/fengari-lua/fengari)(纯 JS 的 Lua 5.4)执行真的桥代码,
 配一个假宿主(`tools/fake-sv.lua`),不需要开 SV2。
 
-**58 个变异,每个都必须让测试变红。**
+**62 个变异,每个都必须让测试变红。**
 
 一个从没红过的测试套件不是证据。`tools/make-mutants.mjs` 把**真实发生过的 bug**
 打进桥的副本,`check-mutants.mjs` 逐个跑,要求全部被抓到:
@@ -187,7 +192,7 @@ caught   split-notes-ascending.lua
 caught   restore-remove-ascending.lua
 caught   dir-candidates-windows-only.lua
 ...
-58/58 个变异被抓到
+62/62 个变异被抓到
 ✓ 测试套件确实会失败(不是永远绿的摆设)
 ```
 
@@ -285,7 +290,8 @@ caught   client-hardcoded-color                    (check-client.mjs)
 | `pitchDelta` 不要碰 | 它是手画音高线,写它会覆盖转录的演唱 |
 | `mouthOpening` 本机不支持 | 文档列了但宿主没有 —— **文档 ≠ 本机能力** |
 | **macOS 未经真机验证** | 桥已经不再依赖 Windows 专有的环境变量与分隔符(会挑 `~/.dsh/sv-bridge`),判据由离线测试台在**两个平台**上守着;但真机只有 Windows 跑过 |
-| 快照只覆盖音符层 | `sv_undo` 不含属性层、组的增删、自动化曲线、声音属性 —— 返回里逐条写明 |
+| 快照不含属性层 | `sv_undo` 覆盖**音符层 + 编排布局**(组的增删/移动/几何都能回滚);音素 / detune / attributes、自动化曲线、声音属性、速度与拍号标记还没有回滚点 |
+| 撤销"删组"依赖组库 API | 靠 `getNumNoteGroups` / `getNoteGroup` 找回孤儿组 —— 这两个**本机没验证过**;拿不到会如实报"找不到那个组",`selftest` 里的 `group-library` 一条专门验它 |
 
 ---
 

@@ -437,6 +437,32 @@ end`]]],
     'restore: remove the surplus notes front-to-back instead of back-to-front (indices shift mid-loop ⇒ the wrong notes are deleted)',
     [['  for i = beforeCount, #target + 1, -1 do\n    call(grp, "removeNote", i)',
       '  for i = #target + 1, beforeCount do   -- MUTANT: ascending removal\n    call(grp, "removeNote", i)']]],
+
+  // ---- 0.8.3:编排布局(组级回滚)-------------------------------------------
+
+  // 快照不带布局 ⇒ 组的增删/移动又回滚不掉了(返回里却还声称能覆盖)。
+  ['snapshot-drops-layout',
+    'snapshot: stop recording the track layout (group create / delete / move become unrecoverable again)',
+    [['  local layout = captureLayout()\n', '  local layout = nil   -- MUTANT: 不记布局\n']]],
+
+  // 只按"UUID 在不在快照里"判多余/缺失 ⇒ **挪到别的轨的组没人管**
+  // (它在快照里,所以不算多余;它在当前轨上,所以也不算缺失)。写测试时正是这么发现的。
+  ['restore-layout-ignores-misplaced',
+    'restoreLayout: treat a group that moved to another track as "fine" (it is neither extra nor missing, so nobody puts it back)',
+    [['          local misplaced = (w ~= nil and w.track ~= now[ti].index)',
+      '          local misplaced = false   -- MUTANT: 挪到别的轨不管']]],
+
+  // 删了却挂不回去 ⇒ 撤销 group_ops delete 失效(而且报告里会说"没有找不回来的")。
+  ['restore-layout-skips-readd',
+    'restoreLayout: never re-mount a reference that the snapshot had (undoing group_ops delete silently does nothing)',
+    [['          local grp = findLibraryGroupByUuid(w.uuid)\n          if grp ~= nil then',
+      '          local grp = findLibraryGroupByUuid(w.uuid)\n          if false then   -- MUTANT: 不挂回去']]],
+
+  // 几何只修一半:时间偏移不还原 ⇒ 组回到轨上了,但位置还是错的。
+  ['restore-layout-drops-timeoffset',
+    'restoreLayout: restore the time range but not the time offset (the group comes back to the right track at the wrong place)',
+    [['            if math.floor(num(call(ref, "getTimeOffset")) or 0) ~= w.timeOffset then',
+      '            if false then   -- MUTANT: 不还原时间偏移']]],
 ]
 
 function apply(src, subs, name) {

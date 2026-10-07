@@ -181,7 +181,20 @@ DSH ⇄ SV2 桥(常驻 Lua / 文件通道)  v0.1.0
 --               根本起不来**(三个都不存在,候选为空);而 DSH 插件用的是
 --               os.homedir()/os.tmpdir()。现在同时认 HOME / TMPDIR,顺序与插件一致。
 --               这条与 0.7.1 的分隔符是**两个独立**的平台问题。
-local BRIDGE_VERSION = "0.8.0"
+--    0.8.3 = **快照扩到组级操作**。0.8.0 的快照只覆盖音符层,而 `write_notes` /
+--            `group_ops clone` 会**新建组**、`group_ops delete` 会**摘掉引用**、
+--            `group_ops move` 会**挪到别的轨** —— 这些都不在音符层里,那时"回滚"救不了,
+--            返回里也如实写着"不含组的增删"。现在快照多存一份**编排布局**
+--            (全工程每条轨的引用清单:UUID / 名字 / 是否主组 / 时间范围 / 时间与音高偏移),
+--            restore 时先删"快照里没有的"、再把"快照里有而没了"的挂回去、最后修几何。
+--            ⚠️ 关键事实:`group_ops delete` **只摘引用、不删库**(删库不可逆)⇒ 撤销删除
+--               靠的是在**组库**里按 UUID 找回那个孤儿组(`getNumNoteGroups`/`getNoteGroup`)。
+--               这两个 API 本机**没验证过** ⇒ 拿不到就如实报"找不到那个组",不猜;
+--               `selftest` 新增一条 `group-library` 专门验它。
+--            ⚠️ 主组与外部音频引用**一律不碰**(主组是宿主的、音频引用重建不了)。
+--            ⚠️ 顺序:重新挂回去的引用只能**追加到轨尾** ⇒ 顺序没复原时
+--               `layout.orderRestored=false` 直说,不假装。
+local BRIDGE_VERSION = "0.8.3"
 local PROTOCOL = 1
 
 local CFG = {
@@ -4788,14 +4801,263 @@ end
 -- 和 PANEL_ASK_PUSH 同一套做法。
 local writeHeartbeatRef = nil
 
+-- ============================================================================
+-- 5c. 编排布局(0.8.3)
+--
+-- 为什么要有:0.8.0 的快照只覆盖**音符层** —— 而 `write_notes` / `group_ops clone`
+-- 会**新建一个组**、`group_ops delete` 会把组**从轨上摘掉**、`group_ops move` 会把组
+-- **挪到别的轨**。这些都不在音符层里 ⇒ 那时"回滚"救不了它们,返回里也如实写了
+-- "不含组的增删"。这一节补上。
+--
+-- 关键事实(决定了它能做到什么):**`group_ops delete` 只摘引用,不删库**
+-- ("删库是不可逆的,不该默认做")。所以撤销删除 = 把引用挂回去 —— 只要还能在**组库**里
+-- 按 UUID 找到那个孤儿组。于是布局快照只需要存**引用**(几十个),不必存别的组的音符
+-- (几百上千个)—— 那会让每一次写操作前的自动快照都变重。
+-- ============================================================================
+
+-- 全工程的"编排布局":每条轨上的每个引用(按轨内下标顺序)。
+-- 为什么存**全工程**:组会在轨之间移动,只存目标组那条轨就抓不到"它跑到别的轨去了"。
+local function captureLayout()
+  local proj = project()
+  if proj == nil then return nil end
+  local nt = num(call(proj, "getNumTracks")) or 0
+  local tracks = {}
+  for ti = 1, nt do
+    local track = call(proj, "getTrack", ti)
+    local entry = { index = ti - 1, refs = {} }
+    if track ~= nil then
+      local ng = num(call(track, "getNumGroups")) or 0
+      for gi = 1, ng do
+        local ref = call(track, "getGroupReference", gi)
+        if ref ~= nil then
+          local grp = call(ref, "getTarget")
+          entry.refs[#entry.refs + 1] = {
+            -- ⚠️ 外部音频引用没有可编辑的组(getTarget() 是 nil)⇒ 没有 UUID。
+            --    这类引用我们**一律不碰**(重建不了,也没有"组"的语义)。
+            uuid = (grp ~= nil) and call(grp, "getUUID") or nil,
+            name = (grp ~= nil) and call(grp, "getName") or nil,
+            instrumental = (grp == nil),
+            isMain = call(ref, "isMain") == true,
+            onset = math.floor(num(call(ref, "getOnset")) or 0),
+            duration = math.floor(num(call(ref, "getDuration")) or 0),
+            timeOffset = math.floor(num(call(ref, "getTimeOffset")) or 0),
+            pitchOffset = num(call(ref, "getPitchOffset")),
+          }
+        end
+      end
+    end
+    tracks[#tracks + 1] = entry
+  end
+  return tracks
+end
+
+-- 布局 → "UUID 在哪条轨的第几个"的索引(只收有 UUID 的)
+local function layoutIndex(layout)
+  local map = {}
+  if type(layout) ~= "table" then return map end
+  for ti = 1, #layout do
+    local refs = layout[ti].refs or {}
+    for ri = 1, #refs do
+      local r = refs[ri]
+      if type(r.uuid) == "string" and #r.uuid > 0 then
+        map[r.uuid] = { track = layout[ti].index, idx = ri - 1, ref = r }
+      end
+    end
+  end
+  return map
+end
+
+-- 在**组库**里按 UUID 找组(不是轨上的引用)。
+-- 撤销"从轨上摘掉"需要它:`group_ops delete` 之后组还在库里,只是没有引用了。
+-- ⚠️ `getNumNoteGroups` / `getNoteGroup` 是宿主 API,本机**没有验证过**;
+--    拿不到就返回 nil,调用方如实报"找不到那个组" —— 不猜。`selftest` 里有一条
+--    专门验这个能力(`group-library`),真机跑一次就知道有没有。
+local function findLibraryGroupByUuid(uuid)
+  if type(uuid) ~= "string" or #uuid == 0 then return nil end
+  local proj = project()
+  if proj == nil then return nil end
+  local n = num(call(proj, "getNumNoteGroups")) or 0
+  for i = 1, n do
+    local g = call(proj, "getNoteGroup", i)
+    if g ~= nil and call(g, "getUUID") == uuid then return g end
+  end
+  return nil
+end
+
+-- 把编排布局对齐回快照。返回一份**如实**的报告:做了什么、做不了什么。
+-- 纪律:① 碰宿主之前先校验;② 主组与外部音频引用一律不碰;③ 删引用倒序(下标不漂移);
+--       ④ 做完回读比对,顺序没复原就直说(orderRestored=false)。
+local function restoreLayout(want)
+  local report = {
+    available = true, removed = 0, moved = 0, readded = 0, geometry = 0,
+    keptMain = {}, unrecoverable = {}, orderRestored = true, mismatch = nil, skipped = nil,
+  }
+  if type(want) ~= "table" or #want == 0 then
+    report.available = false
+    report.skipped = "这份快照里没有编排布局(旧版快照)⇒ 只回滚了音符层"
+    return report
+  end
+  local proj = project()
+  if proj == nil then
+    report.available = false
+    report.skipped = "读不到工程 ⇒ 没有回滚编排布局"
+    return report
+  end
+
+  local wantIdx = layoutIndex(want)
+  local now = captureLayout() or {}
+  local nowIdx = layoutIndex(now)
+
+  -- ---- ① 校验:能做什么、不能做什么,先算清楚 ----
+  for uuid, n in pairs(nowIdx) do
+    if wantIdx[uuid] == nil and n.ref.isMain then
+      report.keptMain[#report.keptMain + 1] = uuid
+    end
+  end
+  for uuid, w in pairs(wantIdx) do
+    if nowIdx[uuid] == nil and not w.ref.instrumental then
+      if findLibraryGroupByUuid(uuid) == nil then
+        report.unrecoverable[#report.unrecoverable + 1] = uuid
+      end
+    end
+  end
+
+  call(proj, "newUndoRecord")
+
+  -- ---- ② 删掉"快照里没有的"引用(倒序,下标不漂移)----
+  -- 两种都算:① 快照里根本没有这个组(新建的);② 组在快照里,但**挂到了别的轨**
+  -- (move 挪走的)。后者如果只按"UUID 在不在快照里"判,会漏掉 —— 组还在,只是位置错了,
+  -- 于是既不算"多余"也不算"缺失",最后谁都不管它(写这个测试时才发现的)。
+  local moved = 0
+  for ti = 1, #now do
+    local track = call(proj, "getTrack", now[ti].index + 1)
+    if track ~= nil then
+      local refs = now[ti].refs or {}
+      for ri = #refs, 1, -1 do
+        local r = refs[ri]
+        if not r.isMain and not r.instrumental and type(r.uuid) == "string" then
+          local w = wantIdx[r.uuid]
+          local extra = (w == nil)
+          local misplaced = (w ~= nil and w.track ~= now[ti].index)
+          if extra or misplaced then
+            call(track, "removeGroupReference", ri)
+            if extra then report.removed = report.removed + 1 else moved = moved + 1 end
+          end
+        end
+      end
+    end
+  end
+  report.moved = moved
+
+  -- ② 之后**重新采一次**:下面的"挂回去"要按**当前真实状态**判断,不能用删之前的快照
+  now = captureLayout() or {}
+  nowIdx = layoutIndex(now)
+
+  -- ---- ③ 把"快照里有、现在没了"的引用挂回去(追加到轨尾)----
+  for ti = 1, #want do
+    local track = call(proj, "getTrack", want[ti].index + 1)
+    if track ~= nil then
+      local refs = want[ti].refs or {}
+      for ri = 1, #refs do
+        local w = refs[ri]
+        if type(w.uuid) == "string" and nowIdx[w.uuid] == nil and not w.instrumental then
+          local grp = findLibraryGroupByUuid(w.uuid)
+          if grp ~= nil then
+            local newRef = SC("create", "NoteGroupReference")
+            if newRef ~= nil then
+              call(newRef, "setTarget", grp)
+              call(newRef, "setTimeRange", w.onset, w.duration)
+              call(newRef, "setTimeOffset", w.timeOffset)
+              if type(w.pitchOffset) == "number" then
+                call(newRef, "setPitchOffset", w.pitchOffset)
+              end
+              call(track, "addGroupReference", newRef)
+              report.readded = report.readded + 1
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- ---- ④ 位置没变、但几何变了的:就地改回去 ----
+  for ti = 1, #want do
+    local track = call(proj, "getTrack", want[ti].index + 1)
+    if track ~= nil then
+      local refs = want[ti].refs or {}
+      for ri = 1, #refs do
+        local w = refs[ri]
+        local n = (type(w.uuid) == "string") and nowIdx[w.uuid] or nil
+        if n ~= nil and n.track == want[ti].index and n.idx == ri - 1 then
+          local ref = call(track, "getGroupReference", ri)
+          if ref ~= nil then
+            if math.floor(num(call(ref, "getOnset")) or 0) ~= w.onset or
+               math.floor(num(call(ref, "getDuration")) or 0) ~= w.duration then
+              call(ref, "setTimeRange", w.onset, w.duration)
+              report.geometry = report.geometry + 1
+            end
+            if math.floor(num(call(ref, "getTimeOffset")) or 0) ~= w.timeOffset then
+              call(ref, "setTimeOffset", w.timeOffset)
+              report.geometry = report.geometry + 1
+            end
+            if type(w.pitchOffset) == "number" and
+               num(call(ref, "getPitchOffset")) ~= w.pitchOffset then
+              call(ref, "setPitchOffset", w.pitchOffset)
+              report.geometry = report.geometry + 1
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- ---- ⑤ 回读比对:顺序复原了没有?还有没有多/少? ----
+  local after = captureLayout() or {}
+  local afterIdx = layoutIndex(after)
+  local missCount, extraCount = 0, 0
+  for uuid in pairs(wantIdx) do
+    if afterIdx[uuid] == nil then missCount = missCount + 1 end
+  end
+  for uuid, n in pairs(afterIdx) do
+    if wantIdx[uuid] == nil and not n.ref.isMain and not n.ref.instrumental then
+      extraCount = extraCount + 1
+    end
+  end
+  local orderOk = true
+  local maxTracks = math.max(#want, #after)
+  for ti = 1, maxTracks do
+    local wrefs = (want[ti] and want[ti].refs) or {}
+    local arefs = (after[ti] and after[ti].refs) or {}
+    local maxRefs = math.max(#wrefs, #arefs)
+    for ri = 1, maxRefs do
+      local wu = (wrefs[ri] and wrefs[ri].uuid) or nil
+      local au = (arefs[ri] and arefs[ri].uuid) or nil
+      if wu ~= au then orderOk = false break end
+    end
+    if not orderOk then break end
+  end
+  report.mismatch = { missing = missCount, extra = extraCount }
+  report.orderRestored = orderOk and (missCount == 0) and (extraCount == 0)
+  return report
+end
+
 -- ---- snapshot ------------------------------------------------------------
 -- 留一份可回滚的组状态。插件侧在**每个写操作之前自动调用**它,也可以手动调。
 -- args: { label?, trackIndex?, groupIndex? }
 function OPS.snapshot(args)
   args = args or {}
   local ref, grp
+  local locatedBy = "current"
   if args.groupIndex ~= nil or args.trackIndex ~= nil then
-    ref, grp = groupAt(args.trackIndex or 0, args.groupIndex or 0)
+    -- ⚠️ 指定位置取不到组时**退回当前组**,而不是整个快照失败:
+    --    组级操作(write_notes 往一条空轨建组)给的 trackIndex 上本来就没有组。
+    --    这时候"音符层覆盖当前组 + 布局覆盖全工程"仍然是有用的回滚点。
+    local ok, r, g = pcall(groupAt, args.trackIndex or 0, args.groupIndex or 0)
+    if ok and g ~= nil then
+      ref, grp, locatedBy = r, g, "position"
+    else
+      ref, grp = currentGroup()
+    end
   else
     ref, grp = currentGroup()
   end
@@ -4804,6 +5066,7 @@ function OPS.snapshot(args)
   end
 
   local notes = captureNotes(grp)
+  local layout = captureLayout()
   local store = snapLoad()
   store.seq = (tonumber(store.seq) or 0) + 1
   local item = {
@@ -4814,6 +5077,8 @@ function OPS.snapshot(args)
     groupName = call(grp, "getName"),
     noteCount = #notes,
     notes = notes,
+    -- 编排布局:哪条轨上挂了哪些组(0.8.3)。组的增删/移动/几何都靠它回滚。
+    layout = layout,
   }
   store.items[#store.items + 1] = item
   while #store.items > SNAP_MAX do table.remove(store.items, 1) end
@@ -4821,12 +5086,18 @@ function OPS.snapshot(args)
     -- 落盘失败**绝不静默**:这份快照不存在,调用方必须知道(否则"以为能回滚")
     error("快照写盘失败:" .. tostring(snapPath()) .. " 不可写 ⇒ 回滚将没有依据")
   end
+  local refCount = 0
+  if type(layout) == "table" then
+    for i = 1, #layout do refCount = refCount + #((layout[i] or {}).refs or {}) end
+  end
   return {
     id = item.id, ts = item.ts, label = item.label,
-    groupName = item.groupName, groupUuid = item.groupUuid,
+    groupName = item.groupName, groupUuid = item.groupUuid, locatedBy = locatedBy,
     noteCount = item.noteCount, kept = #store.items, max = SNAP_MAX,
-    covers = "onset / duration / pitch / lyrics",
-    notCovered = "属性层(音素 / detune / attributes)、组的新建与删除、自动化曲线、声音属性、速度与拍号标记",
+    trackCount = (type(layout) == "table") and #layout or 0,
+    refCount = refCount,
+    covers = "音符层(onset / duration / pitch / lyrics)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
+    notCovered = "属性层(音素 / detune / attributes)、组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
     note = "回滚用 restore {}(最近一份)或 restore { id = \"" .. item.id .. "\" }",
   }
 end
@@ -4952,6 +5223,11 @@ function OPS.restore(args)
     end
   end
 
+  -- ---- ⑤ 编排布局:把组的挂载关系对齐回快照(0.8.3) ----
+  -- 音符层修好了不代表"工程回去了":write_notes / clone 新建的组、delete 摘掉的引用、
+  -- move 挪走的组,都不在音符层里。这一步补上,并且**如实**报告做不了的部分。
+  local layout = restoreLayout(item.layout)
+
   return {
     restored = true, id = item.id, snapshotTs = item.ts, label = item.label,
     groupName = call(grp, "getName"), groupUuid = call(grp, "getUUID"),
@@ -4959,10 +5235,11 @@ function OPS.restore(args)
     beforeCount = beforeCount, targetCount = #w, afterCount = #a,
     written = written, added = added, removed = removed,
     mismatchCount = #mismatch, mismatch = mismatch,
+    layout = layout,
     verdict = (#mismatch == 0) and "OK:与快照逐音符一致(按 onset 排序比对)"
       or "⚠️ 回读与快照不一致 —— 见 mismatch",
-    covers = "onset / duration / pitch / lyrics",
-    notCovered = "属性层(音素 / detune / attributes)、组的新建与删除、自动化曲线、声音属性、速度与拍号标记",
+    covers = "音符层(onset / duration / pitch / lyrics)+ 编排布局(组的挂载、顺序、时间范围与偏移)",
+    notCovered = "属性层(音素 / detune / attributes)、组库里的孤儿数据、自动化曲线、声音属性、速度与拍号标记",
   }
 end
 
@@ -5018,6 +5295,14 @@ function OPS.selftest()
 
   local store = snapLoad()
   add("snapshot-store", snapSave(store), snapPath())
+
+  -- 组库能不能按 UUID 找组?撤销"从轨上摘掉"全靠它(见 5c 节)。
+  -- 拿不到就如实报 —— 这条能力**本机没验证过**,真机跑一次 selftest 就知道。
+  local proj2 = project()
+  local libCount = nil
+  if proj2 ~= nil then libCount = num(call(proj2, "getNumNoteGroups")) end
+  add("group-library", libCount ~= nil, "getNumNoteGroups = " .. tostring(libCount) ..
+      (libCount == nil and "(本机没有这个 API ⇒ 撤销 delete 时找不到孤儿组)" or ""))
 
   return {
     ok = okAll, bridge = BRIDGE_VERSION, protocol = PROTOCOL, dir = ST.dir,
@@ -5586,6 +5871,9 @@ if type(SVDSH_TEST) == "table" then
   SVDSH_TEST.captureNotes = captureNotes
   SVDSH_TEST.snapLoad = snapLoad
   SVDSH_TEST.sortedByOnset = sortedByOnset
+  SVDSH_TEST.captureLayout = captureLayout
+  SVDSH_TEST.restoreLayout = restoreLayout
+  SVDSH_TEST.findLibraryGroupByUuid = findLibraryGroupByUuid
   SVDSH_TEST.CFG = CFG
   SVDSH_TEST.ST = ST
   SVDSH_TEST.PATH = PATH
