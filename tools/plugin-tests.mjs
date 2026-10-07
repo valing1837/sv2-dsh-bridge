@@ -20,6 +20,13 @@ const RUN_ROOT = path.join(HERE, '.harness-run', 'plugin')
 const HOME = path.join(RUN_ROOT, 'userprofile')
 const DIR = path.join(HOME, '.dsh', 'sv-bridge')
 
+// 默认测仓库里的那份;`--plugin <file>` 可以测**另一个副本** ——
+// tools/check-mutants-js.mjs 就是靠它把"故意改坏"的副本喂进来的。
+const argv = process.argv.slice(2)
+const pi = argv.indexOf('--plugin')
+const PLUGIN_FILE =
+  pi >= 0 && argv[pi + 1] ? path.resolve(argv[pi + 1]) : path.join(HERE, '..', 'plugin', 'index.js')
+
 // ⚠️ 必须在 import 插件**之前**改环境:插件的 ensureDir() 用的是 os.homedir(),
 //    Windows 读 USERPROFILE、POSIX 读 HOME ⇒ 两个都指到运行目录里,
 //    否则它会去动你真 home 下的 ~/.dsh/sv-bridge。
@@ -31,7 +38,7 @@ process.env.TEMP = RUN_ROOT
 process.env.TMP = RUN_ROOT
 process.env.APPDATA = path.join(RUN_ROOT, 'appdata')
 
-const mod = await import(pathToFileURL(path.join(HERE, '..', 'plugin', 'index.js')).href)
+const mod = await import(pathToFileURL(PLUGIN_FILE).href)
 
 // ---- 构造"桥正在跑、且第 6 笔没跑完"的状态 --------------------------------
 const now = Math.floor(Date.now() / 1000)
@@ -94,6 +101,8 @@ const check = (label, cond, got) => {
     console.log(`  FAIL  ${label}${got === undefined ? '' : `  (got ${JSON.stringify(got)})`}`)
   }
 }
+/** 工具抛错时给个空对象 —— 让断言干净地报"值不对",而不是在测试里再炸一次 */
+const val = (r) => (r && r.ok ? r.value : {})
 
 console.log('plugin-tests — 插件半边行为测试(模拟的桥状态)')
 console.log(`  假 home: ${HOME}`)
@@ -101,7 +110,7 @@ console.log(`  通道目录: ${DIR}`)
 console.log('')
 
 console.log('— 桥在线 + 有快照 + 面包屑停在 running')
-const st = (await call('sv_status')).value
+const st = val(await call('sv_status'))
 check('online 判为真', st.online === true, st.online)
 check('读到 3 份快照', st.snapshots.count === 3, st.snapshots.count)
 check('最近一份是 s3 / quantize / 462 音',
@@ -115,12 +124,12 @@ check('lastOp 一起回出来', st.lastOp && st.lastOp.op === 'quantize' && st.l
 console.log('\n— 自动快照失败必须被记下来(而不是静默)')
 const tr = await call('sv_transpose', { semitones: 2, expectFp: 'deadbeef' })
 check('写操作本身失败(模拟的桥没有响应)', tr.ok === false)
-const st2 = (await call('sv_status')).value
+const st2 = val(await call('sv_status'))
 check('lastSnapshotError 被记下且指名 op=transpose_selected',
   st2.lastSnapshotError && st2.lastSnapshotError.op === 'transpose_selected', st2.lastSnapshotError)
 
 console.log('\n— sv_doctor:桥"在线"但自检打不通 ⇒ 如实报错 + nextSteps')
-const doc = (await call('sv_doctor')).value
+const doc = val(await call('sv_doctor'))
 check('verdict 是告警而不是 OK', /有问题/.test(doc.verdict), doc.verdict)
 check('仍然报告了快照与肇事 op',
   doc.snapshots.count === 3 && doc.frozen && doc.frozen.op === 'quantize')
@@ -130,11 +139,11 @@ check('nextSteps 里含"冻住"那条', doc.nextSteps.some((s) => /模态框|冻
 
 console.log('\n— 桥离线(心跳被删掉):不能再说是"冻住"')
 fs.rmSync(path.join(DIR, 'svdsh-hb-sv.json'), { force: true })
-const st3 = (await call('sv_status')).value
+const st3 = val(await call('sv_status'))
 check('online 判为假', st3.online === false, st3.online)
 check('frozen 归 null —— 面包屑是上次运行的残留,不是证据', st3.frozen === null, st3.frozen)
 check('hint 告诉用户去哪里跑桥', /运行 \[脚本\]/.test(st3.hint), st3.hint)
-const doc2 = (await call('sv_doctor')).value
+const doc2 = val(await call('sv_doctor'))
 check('doctor 的 nextSteps 第一条是"没有心跳文件"',
   /心跳文件/.test(doc2.nextSteps[0] || ''), doc2.nextSteps)
 

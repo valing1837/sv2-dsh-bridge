@@ -121,6 +121,7 @@ cd tools
 npm install
 node harness.mjs           # 44 条行为测试
 node check-mutants.mjs     # 58 个变异,漏一个就红
+node check-mutants-js.mjs  # 另外三半:12 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
 node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
@@ -192,6 +193,24 @@ caught   dir-candidates-windows-only.lua
 
 这套纪律已经抓到过自己的失效两次:两个变异的替换串在加了新代码后
 **匹配到两处**,等于什么都没改 —— 现在生成器要求每条替换**恰好命中一次**。
+
+**另外三半也上同一套门禁**(`make-mutants-js.mjs` / `check-mutants-js.mjs`,12 个变异):
+插件 / 面板 / 浏览器那三半的测试以前**从没被证明过**会不会失败。现在每个变异都指定
+"由哪个测试抓",逐条要求它变红:
+
+```
+caught   plugin-frozen-ignores-missing-heartbeat   (plugin-tests.mjs)
+caught   panel-ask-refreshes-immediately           (panel-tests.mjs)
+caught   client-hardcoded-color                    (check-client.mjs)
+...
+12/12 个变异被抓到
+✓ 插件 / 面板 / 浏览器三半的测试确实会失败(不是永远绿的摆设)
+```
+
+> ⚠️ 两条门禁的子进程**一律不走管道**(`stdio: ignore/inherit`):管道在受限环境里会
+> EPERM,而"环境坏了也要能跑"恰恰是门禁的本分。改成不看子进程 stdout 之后,
+> **在本机沙箱里也能跑完**(以前只能靠 CI)。变异体的失败报告又长又没用 ——
+> 每个变异都**应该**失败,全打出来只会淹掉真正的信息;stderr 留着,真出错时看得见。
 
 **五道守卫**:
 
@@ -280,8 +299,10 @@ plugin/              DSH 宿主侧 + SV2 侧脚本
   sv/DSHPanel.js       侧栏面板
 tools/               离线测试与工具
   harness.mjs          44 条行为测试
-  make-mutants.mjs     生成"故意改坏"的副本
-  check-mutants.mjs    要求每个变异都被抓到
+  make-mutants.mjs     生成"故意改坏"的副本(桥)
+  check-mutants.mjs    要求每个变异都被抓到(桥,58 个)
+  make-mutants-js.mjs  生成"故意改坏"的副本(插件 / 面板 / 浏览器)
+  check-mutants-js.mjs 要求每个变异都被抓到(另外三半,12 个)
   check-lua.mjs        语法 + 元数据 + ES5 + emoji 守卫
   check-file.mjs       编码守卫
   check-client.mjs     浏览器半边守卫(主题 token / 字形 / DOM)

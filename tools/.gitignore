@@ -1,3 +1,5 @@
 node_modules/
 .harness-run/
+# 变异体是**生成物**(make-mutants*.mjs 每次重建),不进库
 .mutants/
+.mutants-js/

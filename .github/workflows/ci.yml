@@ -57,3 +57,7 @@ jobs:
       - name: Mutation harness (every mutant must be caught)
         working-directory: tools
         run: node check-mutants.mjs
+
+      - name: Mutation harness — plugin / panel / browser halves
+        working-directory: tools
+        run: node check-mutants-js.mjs
