@@ -18,7 +18,13 @@ import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PANEL_FILE = path.join(HERE, '..', 'plugin', 'sv', 'DSHPanel.js')
+// 默认测仓库里的那份;`--panel <file>` 可以测**另一个副本**(变异测试用)
+const argv = process.argv.slice(2)
+const pi = argv.indexOf('--panel')
+const PANEL_FILE =
+  pi >= 0 && argv[pi + 1]
+    ? path.resolve(argv[pi + 1])
+    : path.join(HERE, '..', 'plugin', 'sv', 'DSHPanel.js')
 
 // SV2 侧栏大约这么宽。真机宽度由宿主决定,我们控制不了 —— 所以判据是
 // "**最窄**要能撑到多少像素":测试会算出让每个按钮都不被截断所需的最小宽度。

@@ -15,17 +15,23 @@ import { fileURLToPath } from 'node:url'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mutantsDir = path.join(here, '.mutants')
 
+// ⚠️ 子进程一律**不走管道**(stdio 用 ignore/inherit):
+//    · 管道在受限环境(沙箱)里会 EPERM —— 而这条门禁恰恰是"环境坏了也要能跑"的东西;
+//    · 我们只需要**退出码**,不需要子进程的 stdout —— 变异体跑出来的报告又长又没用
+//      (每个变异都**应该**失败,把它们的失败报告全打出来只会淹掉真正的信息)。
+//    stderr 留着:生成器的报错(模式没对上 / CRLF 守卫)都走那边,真出事时看得见。
+const NO_PIPE = ['ignore', 'ignore', 'inherit']
+
 // ① 先生成
 const gen = spawnSync(process.execPath, [path.join(here, 'make-mutants.mjs')], {
   cwd: here,
-  encoding: 'utf8',
+  stdio: NO_PIPE,
 })
 if (gen.status !== 0) {
-  console.error('make-mutants.mjs 失败:')
+  console.error('make-mutants.mjs 失败(原因见它自己的输出)')
   // ⚠️ 子进程**根本没起来**时(ENOENT/EPERM/沙箱),stdout/stderr 都是空的 ——
   //    只打那两个会得到一行什么都没有的报错。真正的原因在 gen.error 里。
   if (gen.error) console.error(`  子进程没跑起来:${gen.error.message}`)
-  console.error(gen.stdout || '', gen.stderr || '')
   process.exit(1)
 }
 
@@ -53,7 +59,7 @@ for (const name of mutants) {
   const r = spawnSync(
     process.execPath,
     [path.join(here, 'harness.mjs'), '--bridge', path.join(mutantsDir, name)],
-    { cwd: here, encoding: 'utf8' },
+    { cwd: here, stdio: NO_PIPE },
   )
   // ⚠️ 子进程**没跑起来**时 status 是 null,而 `null !== 0` 会被算成"抓到了" ——
   //    也就是说环境一坏,这个门禁会打印 "N/N 被抓到 ✓" 却一个变异都没跑。

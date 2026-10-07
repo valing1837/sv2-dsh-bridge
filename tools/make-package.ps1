@@ -51,6 +51,7 @@ try {
   & $node check-client.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
   & $node plugin-tests.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
   & $node panel-tests.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
+  & $node check-mutants-js.mjs 2>&1 | Select-String -Pattern '个变异|✓' | ForEach-Object { "  $_" }
 } finally {
   Pop-Location
 }
