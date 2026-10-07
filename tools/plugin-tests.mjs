@@ -239,6 +239,20 @@ check('没给配置 ⇒ 全默认', emptyCfg.cfg.timeoutMs === 12000 && emptyCfg
 const st0 = val(await call('sv_status'))
 check('sv_status 会报出配置改动(这里是空数组)', Array.isArray(st0.configNotes), st0.configNotes)
 
+console.log('\n— 自动快照:该拍的才拍')
+// 起因:用户 2026-10-07 在 sv_status 里看到 5 份快照,而那轮**只做过 dry-run** ——
+// dry-run 不改工程 ⇒ 白占快照位(上限 8),还会把真正要用的那份挤出去。
+const { shouldSnapshot } = mod
+check('导出了 shouldSnapshot', typeof shouldSnapshot === 'function')
+check('写操作 + dryRun:true ⇒ **不拍**', shouldSnapshot('quantize', { dryRun: true }) === false)
+check('写操作 + dryRun:false ⇒ 拍', shouldSnapshot('quantize', { dryRun: false }) === true)
+check('写操作 + 没给 dryRun ⇒ 拍', shouldSnapshot('quantize', {}) === true)
+check('写操作 + 连 args 都没有 ⇒ 拍', shouldSnapshot('quantize', undefined) === true)
+check('只读 op ⇒ 不拍', shouldSnapshot('get_notes', {}) === false)
+check('snapshot / restore 自己 ⇒ 不拍(否则回滚会把"要回滚的状态"再存一份)',
+  shouldSnapshot('snapshot', {}) === false && shouldSnapshot('restore', {}) === false)
+check('dryRun 只认布尔真(dryRun: 1 不算)', shouldSnapshot('quantize', { dryRun: 1 }) === true)
+
 console.log('')
 if (failed === 0) {
   console.log('OK: 插件半边行为全部通过')

@@ -117,6 +117,19 @@ const SNAPSHOT_BEFORE = new Set([
   'group_ops',
 ])
 
+/**
+ * 这次调用该不该自动拍快照?
+ *
+ * ⚠️ **dry-run 不拍** —— 用户 2026-10-07 在 `sv_status` 里看到 5 份快照,而那轮只做过
+ *    dry-run。dry-run 不改工程 ⇒ 白占快照位(上限 8 份),还会把真正要用的那份**挤出去**。
+ *    抽成纯函数是为了能离线测(与 `sanitizeConfig` 同一个做法)。
+ */
+export function shouldSnapshot(op, args) {
+  if (!SNAPSHOT_BEFORE.has(op)) return false
+  if (args && typeof args === 'object' && args.dryRun === true) return false
+  return true
+}
+
 const DEFAULTS = {
   pollMs: 40,
   timeoutMs: 12000,
@@ -739,7 +752,7 @@ export function buildTools(deps) {
   const undoTool = {
     name: 'sv_undo',
     description:
-      'Roll the current Synthesizer V Studio project back to a snapshot. A snapshot is taken AUTOMATICALLY before every note-level or group-level write (delete/split/transpose/lyrics/attrs/quantize/pitch curves/ornaments/auto-tune/write_notes/group_ops), so this is the safety net for "the write was valid but wrong". With no `id` it restores the most recent snapshot; sv_status lists what is available. Coverage: the note layer (onset/duration/pitch/lyrics) of the snapshot\'s group PLUS the arrangement layout (which groups are mounted on which track, their order, time range and offsets — so a created group is unmounted, a deleted one is re-mounted, a moved one comes back). NOT covered: the attribute layer, orphaned data in the group library, automation curves, voice settings, tempo/meter marks.',
+      'Roll the current Synthesizer V Studio project back to a snapshot. A snapshot is taken AUTOMATICALLY before every note-level or group-level write (delete/split/transpose/lyrics/attrs/quantize/pitch curves/ornaments/auto-tune/write_notes/group_ops), so this is the safety net for "the write was valid but wrong". With no `id` it restores the most recent snapshot; sv_status lists what is available. Coverage: the note layer (onset/duration/pitch/lyrics), the ATTRIBUTE layer (phonemes/language/rap accent/detune/musical type/attribute table) and the arrangement layout (which groups are mounted on which track, their order, time range and offsets — so a created group is unmounted, a deleted one is re-mounted, a moved one comes back). NOT covered: orphaned data in the group library, automation curves, voice settings, tempo/meter marks.',
     parameters: objectSchema({
       id: {
         type: 'string',
@@ -992,7 +1005,7 @@ export function apply(ctx, config) {
    *    sv_doctor 都会显示出来。用户以为能回滚、其实回不去,是最坏的一种。
    */
   const callOp = async (op, args, exec) => {
-    if (SNAPSHOT_BEFORE.has(op)) {
+    if (shouldSnapshot(op, args)) {
       try {
         const snapArgs = { label: op }
         if (args && typeof args === 'object') {
@@ -1150,9 +1163,10 @@ export function apply(ctx, config) {
           '被拒成 STALE_SELECTION 说明用户在宿主里改过工程,重新读一次再写,不要重试同一个 fp。',
           '桥一次只能处理一个请求,不要并发下发;写操作不要"超时就重试"。',
           '**每个改音符/改组的写操作之前,插件会自动留一份快照**;写错了(写得对但结果不对)用',
-          '**sv_undo** 回到写之前 —— 别急着手动反向改。快照覆盖**音符层**(onset/时值/音高/歌词)',
-          '与**编排布局**(哪条轨挂了哪些组、顺序、时间范围与偏移 ⇒ 新建的组会摘掉、删掉的组会挂回来、',
-          '挪走的组会挪回来);不含属性层、组库里的孤儿数据、自动化曲线和声音属性,别把它当万能撤销。',
+          '**sv_undo** 回到写之前 —— 别急着手动反向改。快照覆盖**音符层**(onset/时值/音高/歌词)、',
+          '**属性层**(音素 / 语种 / 说唱重音 / detune / 演唱类型 / 属性表)与**编排布局**',
+          '(哪条轨挂了哪些组、顺序、时间范围与偏移 ⇒ 新建的组会摘掉、删掉的组会挂回来、挪走的组会挪回来);',
+          '不含组库里的孤儿数据、自动化曲线、声音属性和速度/拍号标记,别把它当万能撤销。',
           '',
           '## SV2 调参标准流程("全参")',
           fullDoc

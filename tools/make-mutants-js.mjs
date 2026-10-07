@@ -182,6 +182,12 @@ export const MUTANTS = [
 
   // ---- 配置夹取(plugin-tests.mjs)------------------------------------------
   // profile 里那几项配置是裸值。写错类型坏的是**行为**,而报错完全看不出原因。
+  ['plugin-dryrun-takes-snapshot',
+    'plugin: dry-run 也拍快照(白占快照位,把真正要用的那份挤出上限 8 份)',
+    'plugin', 'plugin-tests.mjs',
+    [["  if (args && typeof args === 'object' && args.dryRun === true) return false",
+      "  // MUTANT: dry-run 也拍"]]],
+
   ['plugin-config-nan-passthrough',
     'plugin: 配置给了非数字也照收 ⇒ NaN 一路传到 setTimeout,每次调用瞬间"超时"且报错看不懂',
     'plugin', 'plugin-tests.mjs',

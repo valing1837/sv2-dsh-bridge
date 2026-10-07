@@ -127,6 +127,9 @@ newNote = function(onset, dur, pitch, lyrics)
     _onset = onset or 0, _dur = dur or QUARTER, _pitch = pitch or 60,
     _lyrics = lyrics or "", _phonemes = "", _detune = 0,
     _lang = "", _rap = "", _parent = nil,
+    -- 演唱类型(sing / rap)与音高自动模式 —— 真机有这两个 API,假宿主补齐(0.9.3),
+    -- 否则属性层的快照/回滚只能覆盖一半。
+    _musicalType = nil, _pitchAutoMode = nil,
     -- ⚠️ 真机语义(参考项目 SV-007):Note:getAttributes() **只返回写过的键** ——
     --    没写过的键是 nil,不是默认值。所以这里只记 setter 显式写过的属性,
     --    构造函数直接摆进去的初值**不算写过**(新建的音符 attributes 是空的)。
@@ -153,6 +156,13 @@ newNote = function(onset, dur, pitch, lyrics)
   function n:setLanguageOverride(v) self._lang = v; self._attrs.languageOverride = v end
   function n:getRapAccent() return self._rap end
   function n:setRapAccent(v) self._rap = v; self._attrs.rapAccent = v end
+  -- ⚠️ 这两个**不写进 _attrs** —— 真机的 attributes 里没有它们(它们是 Note 自己的字段),
+  --    参考项目的 SV-007 结论:getAttributes 只回"写过的属性键"。乱塞进 _attrs 会让
+  --    38 号测试("桥不会把不认识的键递给宿主")失去意义。
+  function n:getMusicalType() return self._musicalType end
+  function n:setMusicalType(v) self._musicalType = v end
+  function n:getPitchAutoMode() return self._pitchAutoMode end
+  function n:setPitchAutoMode(v) self._pitchAutoMode = v end
   -- 只回**写过的**键(浅拷贝,别把内部表交出去)
   function n:getAttributes()
     local out = {}
