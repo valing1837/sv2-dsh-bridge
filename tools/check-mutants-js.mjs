@@ -52,7 +52,9 @@ for (const m of plan) {
         ? ['--panel', file]
         : m.test === 'plugin-tests.mjs'
           ? ['--plugin', file]
-          : null
+          : m.test === 'check-file.mjs'
+            ? [file]   // check-file 是"体检一组文件",副本直接当参数喂进去
+            : null
   if (arg === null) {
     broken += 1
     console.log(`  ERROR    ${m.name}   ← 清单里的测试名不认识:${m.test}`)

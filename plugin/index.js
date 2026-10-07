@@ -29,11 +29,43 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-sv-bridge'
 
 /** 工具注册表是硬依赖;其余服务都在调用时用 ctx.get 取,缺失就优雅降级。 */
 export const inject = ['tools']
+
+// ---- 随包文档 -------------------------------------------------------------
+// 为什么要有这一段:prompt 里会点名"动手前先读 <某文档>"。如果那个路径指向
+// **开发用的工作区**(例如 `sv-dsh/docs/全参流程.md`),那么用户一清空或搬走工作区,
+// 这句话就变成一句空话 —— agent 会去找一个不存在的文件,白花一步。
+// 而这个 bundle 是**拷进 profile** 的(见 README 的安装一节),只有它**自己旁边**
+// 的文件才一定在 ⇒ 文档随包发一份,路径在运行时算出来。
+const DOCS_DIR = (() => {
+  try {
+    return path.join(path.dirname(fileURLToPath(import.meta.url)), 'docs')
+  } catch {
+    return null
+  }
+})()
+
+/** 随包发出的文档 —— `tools/check-file.mjs` 守着"清单里每个文件都真的在包里"。 */
+export const BUNDLED_DOCS = ['全参流程.md', '音频转音符.md']
+
+/**
+ * 把文档名解析成**真的存在**的绝对路径;不在就返回 null。
+ * ⚠️ 不猜、不拼一个"看起来对"的路径 —— 调用方拿 null 时要如实说"没随包发出"。
+ */
+export function resolveDoc(fileName) {
+  if (!DOCS_DIR) return null
+  const p = path.join(DOCS_DIR, fileName)
+  try {
+    return fs.existsSync(p) ? p : null
+  } catch {
+    return null
+  }
+}
 
 const PROTOCOL = 1
 /** 心跳多久算过期。桥的轮询间隔是 250ms、心跳 5s,15s 留了余量。 */
@@ -1054,6 +1086,8 @@ export function apply(ctx, config) {
   // 同样用 ctx.inject:在 apply 里 ctx.get('systemPrompt') 也可能因为激活顺序拿不到。
 
   ctx.inject(['systemPrompt'], (sub) => {
+    // 文档路径**运行时算**:随包发的那份才一定在(工作区随时可能被清空/搬走)。
+    const fullDoc = resolveDoc('全参流程.md')
     sub.effect(() =>
       sub.systemPrompt.section({
         name: 'sv-dsh-bridge',
@@ -1072,7 +1106,9 @@ export function apply(ctx, config) {
           '挪走的组会挪回来);不含属性层、组库里的孤儿数据、自动化曲线和声音属性,别把它当万能撤销。',
           '',
           '## SV2 调参标准流程("全参")',
-          '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',
+          fullDoc
+            ? `完整版见 ${fullDoc} —— **动手前先读它**。同目录还有 音频转音符.md。要点:`
+            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',
           '① group_ops {action:"list"} 看**全部**轨与组 —— 不能只看当前组(踩过:漏了 76% 的音符)',
           '②③ quantize {dryRun:true} 顺带做布局体检;delta 全 0 ⇒ 本来就量化好,别动',
           '④ auto_tone_shift:先查声库官方音域;maxAbsCents ≤100 可补,>400 说明方案不成立(该换声库)',
