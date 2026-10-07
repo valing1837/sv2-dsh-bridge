@@ -66,13 +66,37 @@ export const MUTANTS = [
       '      const frozen = frozenCrumb(hb)\n      if (false) {\n        nextSteps.push(']]],
 
   // ---- 面板半边(panel-tests.mjs)-----------------------------------------
-  // 2026-10-07 大改:快捷动作删了,旧的两条(日志不让位 / 答题时仍排快捷动作)
-  // 前者留、后者换成针对**新版面**的变异。
-  ['panel-log-no-shrink',
-    '面板:有选择题时回复区不让位(300 顶着,题目与选项被挤到要滚)',
+  // 2026-10-07 两次大改之后:快捷动作删了、回复区从 TextArea 换成纯文字。
+  // 变异清单跟着改 —— 指向已删代码的变异会被生成器直接判"模式命中 0 次"。
+  ['panel-reply-back-to-textarea',
+    '面板:回复区又变回 TextArea(宿主没有只读字段 ⇒ 用户又能往里打字了 —— 用户 2026-10-07 报的正是这个)',
     'panel', 'panel-tests.mjs',
-    [['    var logHeight = asking ? PANEL.LOG_HEIGHT_ASK : PANEL.LOG_HEIGHT',
-      '    var logHeight = PANEL.LOG_HEIGHT   // MUTANT: 不让位']]],
+    [["    var reply = st.replyLines && st.replyLines.length ? st.replyLines : ['']\n    for (var r2 = 0; r2 < reply.length; r2++) {\n      rows.push({ type: 'Label', text: reply[r2] })\n    }",
+      "    rows.push({ type: 'Container', columns: [\n      { type: 'TextArea', value: wInput, height: 300, width: 1.0, readOnly: true }] })   // MUTANT: 变回输入框"]]],
+
+  ['panel-reply-no-wrap',
+    '面板:回复不自己折行(赌宿主会自动折 —— 官方 Label 示例里没有任何这种承诺)',
+    'panel', 'panel-tests.mjs',
+    [['    for (var at = 0; at < line.length; at += cols) out.push(line.substr(at, cols))',
+      '    out.push(line)   // MUTANT: 不折行']]],
+
+  ['panel-reply-no-cap',
+    '面板:长回复不截断(回复区把面板撑到要滚,选项和输入框被顶出视野)',
+    'panel', 'panel-tests.mjs',
+    [['  st.replyLines = wrapForPanel(text, PANEL.REPLY_COLS, maxLines)',
+      '  st.replyLines = wrapForPanel(text, PANEL.REPLY_COLS, 999)   // MUTANT: 不截断']]],
+
+  ['panel-reply-no-shrink',
+    '面板:有选择题时回复区不让位(该给选项腾地方的时候没腾)',
+    'panel', 'panel-tests.mjs',
+    [['  var maxLines = st.ask ? PANEL.REPLY_LINES_ASK : PANEL.REPLY_LINES',
+      '  var maxLines = PANEL.REPLY_LINES   // MUTANT: 不让位']]],
+
+  ['panel-reply-silent-truncate',
+    '面板:截断了却不说还有多少行、去哪儿看(用户以为那就是全部)',
+    'panel', 'panel-tests.mjs',
+    [["    out[maxLines - 1] = '…(后面还有 ' + (total - maxLines + 1) + ' 行,完整在 DSH 看)'",
+      "    out[maxLines - 1] = '…'   // MUTANT: 截断不吭声"]]],
 
   ['panel-input-does-not-shrink',
     '面板:答题时小输入框不收缩(该把地方让给选项的时候没让)',
@@ -95,13 +119,13 @@ export const MUTANTS = [
   ['panel-ask-refreshes-immediately',
     '面板:题目一到就重建面板(冲掉用户正在输入框里打的字 —— 文件头纪律第 3 条)',
     'panel', 'panel-tests.mjs',
-    [['        st.askNeedsRefresh = true\n        return true',
+    [['        st.needsRefresh = true\n        return true',
       '        try { SV.refreshSidePanel() } catch (e9) {}\n        return true   // MUTANT: 当场重建']]],
 
   ['panel-step-refreshes-while-typing',
     '面板:step() 不等输入框干净就重建(同样会冲掉没发出去的字)',
     'panel', 'panel-tests.mjs',
-    [['    if (st.askNeedsRefresh && !inputDirty()) {', '    if (st.askNeedsRefresh) {   // MUTANT: 不等输入框干净']]],
+    [['    if (st.needsRefresh && !inputDirty()) {', '    if (st.needsRefresh) {   // MUTANT: 不等输入框干净']]],
 
   ['panel-long-separator',
     '面板:时间戳分隔行又变回 22 个字符(窄框里等于白占一整行)',
