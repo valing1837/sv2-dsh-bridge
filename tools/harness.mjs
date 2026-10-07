@@ -108,6 +108,9 @@ const TESTS = [
   ['38', 'set_note_attrs: the attributes layer'],
   ['39', 'track_ops list: displayOrder + summed noteCount'],
   ['40', 'group_ops move: same-track / main / failed add'],
+  ['41', 'dirCandidates: Windows / macOS / empty env'],
+  ['42', 'snapshot + restore: edit / delete / split / UUID / corrupt'],
+  ['43', 'selftest: the full-chain self check'],
 ]
 
 const results = new Map()
@@ -2460,6 +2463,149 @@ function testGroupMove() {
 }
 
 // ---------------------------------------------------------------------------
+// test 41 — directory candidates: Windows / macOS / empty env
+// ---------------------------------------------------------------------------
+// The bridge used to read only USERPROFILE / TEMP / TMP. macOS sets neither of
+// those (it sets HOME / TMPDIR), so the candidate list came out EMPTY and the
+// bridge died with "no writable channel dir" — while the DSH plugin had happily
+// created ~/.dsh/sv-bridge via os.homedir(). dirCandidates() takes an injected
+// getenv, so this test runs — and therefore guards macOS — on every platform,
+// including the Windows CI job.
+function testDirCandidates() {
+  const c = checks()
+
+  const win = JSON.parse(callGlobal(L, '__T_dircands', ['win']))
+  c.eq('win: two candidates', win.length, 2)
+  c.eq('win: home first (USERPROFILE)', win[0], 'C:\\Users\\u\\.dsh\\sv-bridge')
+  c.eq('win: temp second (TEMP)', win[1], 'C:\\Temp\\dsh-sv-bridge')
+
+  const mac = JSON.parse(callGlobal(L, '__T_dircands', ['mac']))
+  c.eq('mac: two candidates (not zero)', mac.length, 2)
+  c.eq('mac: HOME is honoured', mac[0], '/Users/u/.dsh/sv-bridge')
+  c.eq('mac: TMPDIR is honoured', mac[1], '/var/folders/t/dsh-sv-bridge')
+
+  const none = JSON.parse(callGlobal(L, '__T_dircands', ['empty']))
+  c.eq('empty env ⇒ no candidates (fatal, never a wrong guess)', none.length, 0)
+
+  c.done('41', TESTS[41][1])
+}
+
+// ---------------------------------------------------------------------------
+// test 42 — snapshot / restore (rollback)
+// ---------------------------------------------------------------------------
+// Every write op is irreversible: the batch discipline guarantees "never writes
+// something broken", not "never writes the wrong thing". This pins the safety
+// net, including the two shapes that actually bite — restoring a DELETED note
+// (needs create+addNote, and addNote inserts by onset) and rolling back after
+// the user has already switched to a different group (must locate by UUID).
+function testSnapshotRestore() {
+  const c = checks()
+  resetWorld()
+  callGlobal(L, '__T_snapReset')
+  const A0 = callGlobal(L, '__T_notesState')
+  const N = callGlobal(L, '__T_noteCount')
+
+  // (a) nothing to roll back yet ⇒ refuse, do not guess
+  const a = req('restore', {})
+  c.eq('(a) restore with no snapshot is refused', a.ok, false)
+  c.ok('(a) the error says there is nothing to roll back',
+    /没有任何快照/.test(a.error || ''), a.error)
+
+  // (b) snapshot captures the group and lands on disk
+  const b = req('snapshot', { label: 'unit' })
+  c.eq('(b) snapshot ok', b.ok, true)
+  c.eq('(b) first id', b.result && b.result.id, 's1')
+  c.eq('(b) noteCount', b.result && b.result.noteCount, N)
+  c.ok('(b) the snapshot file exists', callGlobal(L, '__T_snapRaw').length > 0)
+  c.ok('(b) the reply states what is NOT covered (no over-promising)',
+    /属性层/.test((b.result && b.result.notCovered) || ''), b.result && b.result.notCovered)
+
+  // (c) a host-side edit (pitch + time range) is undone by restore
+  callGlobal(L, '__T_setPitch', [1, 71])
+  callGlobal(L, '__T_setNoteRangeQuarter', [2, 0.5, 0.25])
+  c.ok('(c) the edit really changed the group', callGlobal(L, '__T_notesState') !== A0)
+  const r1 = req('restore', {})
+  c.eq('(c) restore ok', r1.ok, true)
+  c.eq('(c) no read-back mismatch', r1.result && r1.result.mismatchCount, 0)
+  c.eq('(c) the group is back to the snapshot', callGlobal(L, '__T_notesState'), A0)
+
+  // (d) a deleted note comes back (create + addNote path)
+  const fp = req('get_notes', {}).result.groupFp
+  const d = req('delete_notes', { indices: [1], expectGroupFp: fp })
+  c.eq('(d) delete_notes ok', d.ok, true)
+  c.eq('(d) one note fewer', callGlobal(L, '__T_noteCount'), N - 1)
+  const r2 = req('restore', {})
+  c.eq('(d) restore brought the note back', callGlobal(L, '__T_noteCount'), N)
+  c.eq('(d) content matches the snapshot', callGlobal(L, '__T_notesState'), A0)
+
+  // (e) two splits add two notes; restore removes BOTH extras.
+  // Two extras on purpose: with a single extra, ascending and descending removal
+  // happen to agree, so the direction bug would stay invisible (the mutant
+  // `restore-remove-ascending` exists to keep that honest).
+  const fp2 = req('get_notes', {}).result.groupFp
+  const e = req('split_notes', { splits: [{ index: 0, atQuarter: 0.5 }], expectGroupFp: fp2 })
+  c.eq('(e) first split ok', e.ok, true)
+  const fp3 = req('get_notes', {}).result.groupFp
+  const e2 = req('split_notes', { splits: [{ index: 2, atQuarter: 1.5 }], expectGroupFp: fp3 })
+  c.eq('(e) second split ok', e2.ok, true)
+  c.eq('(e) two notes more', callGlobal(L, '__T_noteCount'), N + 2)
+  const r3 = req('restore', {})
+  c.eq('(e) restore removed both extra notes', callGlobal(L, '__T_noteCount'), N)
+  c.eq('(e) content matches the snapshot', callGlobal(L, '__T_notesState'), A0)
+
+  // (f) the user switched to another group ⇒ locate the snapshot's group by UUID
+  const g2 = req('write_notes', { notes: [{ onset: 0, duration: 1, pitch: 72 }] })
+  c.eq('(f) a second group exists', g2.ok, true)
+  callGlobal(L, '__T_useGroupAt', [2])
+  const B0 = JSON.stringify(req('get_notes', {}).result.notes)
+  callGlobal(L, '__T_setPitch', [1, 55])       // mutate group A behind the bridge's back
+  const r4 = req('restore', {})
+  c.eq('(f) located by uuid, not by "current group"', r4.result && r4.result.locatedBy, 'uuid')
+  c.eq('(f) group A is restored', callGlobal(L, '__T_notesState'), A0)
+  c.eq('(f) the current group (B) was NOT touched',
+    JSON.stringify(req('get_notes', {}).result.notes), B0)
+  callGlobal(L, '__T_useGroupAt', [1])
+
+  // (g) unknown id / corrupt snapshot ⇒ refuse, and say why
+  const g = req('restore', { id: 's99' })
+  c.eq('(g) an unknown id is refused', g.ok, false)
+  c.ok('(g) the error lists the ids that do exist', /s1/.test(g.error || ''), g.error)
+  callGlobal(L, '__T_snapWrite', ['{"seq":1,"items":[{"id":"s1","notes":"not-an-array"}]}'])
+  const h = req('restore', {})
+  c.eq('(h) a corrupt snapshot is refused', h.ok, false)
+  c.ok('(h) the message names the damage', /损坏/.test(h.error || ''), h.error)
+
+  c.done('42', TESTS[42][1])
+}
+
+// ---------------------------------------------------------------------------
+// test 43 — selftest: the full-chain self check
+// ---------------------------------------------------------------------------
+function testSelftest() {
+  const c = checks()
+  resetWorld()
+  const r = req('selftest', {})
+  c.eq('selftest ok', r.ok, true)
+  const res = r.result || {}
+  c.eq('overall ok', res.ok, true)
+  c.eq('bridge version matches the module', res.bridge, callGlobal(L, '__T_version'))
+
+  const names = (res.checks || []).map((x) => x.name)
+  for (const need of ['dir', 'write', 'atomic-overwrite', 'remove', 'heartbeat',
+                      'log', 'timer', 'ticks', 'host', 'project', 'snapshot-store']) {
+    c.ok(`check present: ${need}`, names.includes(need), names.join(','))
+  }
+  c.ok('every check passed',
+    (res.checks || []).every((x) => x.ok === true),
+    JSON.stringify((res.checks || []).filter((x) => !x.ok)))
+  c.eq('opCount counts every registered op', res.opCount,
+    callGlobal(L, '__T_opnames').split(',').length)
+  c.ok('the probe file is cleaned up afterwards',
+    !fs.existsSync(path.join(BRIDGE_DIR, 'svdsh-selftest.tmp')))
+  c.done('43', TESTS[43][1])
+}
+
+// ---------------------------------------------------------------------------
 // beyond-spec observations (NOT tests): printed as NOTE, never as a failure
 // ---------------------------------------------------------------------------
 
@@ -2630,6 +2776,9 @@ const PLAN = [
   ['38', testNoteAttrsLayer],
   ['39', testTrackOpsListOrder],
   ['40', testGroupMove],
+  ['41', testDirCandidates],
+  ['42', testSnapshotRestore],
+  ['43', testSelftest],
 ]
 
 function main() {

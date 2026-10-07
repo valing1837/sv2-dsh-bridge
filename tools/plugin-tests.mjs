@@ -1,0 +1,160 @@
+// 插件半边(plugin/index.js)的**行为**测试。
+//
+// 为什么需要它:`check-plugin.mjs` 只验"工具定义合法"(schema / 路由 / 提示词段),
+// 它不跑任何业务逻辑。于是插件侧最容易出错的那部分 —— **状态判断** —— 一直没人守:
+// 桥到底算不算在线?面包屑算不算"冻住"?自动快照失败了有没有说出来?
+// 这些判断错了,界面和工具会安静地给出**错的结论**(把"桥没在跑"说成"宿主被冻住了"
+// 就是本文件第一次跑就抓到的那种)。
+//
+// 做法:不装插件、不碰真 SV2、不碰你的 profile —— 在 `.harness-run/plugin/` 里造一份
+// 假的 home 与通道目录,把心跳 / 面包屑 / 快照栈写成**精心构造的那几种状态**,
+// 再用桩 ctx 加载插件、真的去调它的工具,断言输出。
+//
+//   node plugin-tests.mjs
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const RUN_ROOT = path.join(HERE, '.harness-run', 'plugin')
+const HOME = path.join(RUN_ROOT, 'userprofile')
+const DIR = path.join(HOME, '.dsh', 'sv-bridge')
+
+// ⚠️ 必须在 import 插件**之前**改环境:插件的 ensureDir() 用的是 os.homedir(),
+//    Windows 读 USERPROFILE、POSIX 读 HOME ⇒ 两个都指到运行目录里,
+//    否则它会去动你真 home 下的 ~/.dsh/sv-bridge。
+fs.rmSync(RUN_ROOT, { recursive: true, force: true })
+fs.mkdirSync(DIR, { recursive: true })
+process.env.USERPROFILE = HOME
+process.env.HOME = HOME
+process.env.TEMP = RUN_ROOT
+process.env.TMP = RUN_ROOT
+process.env.APPDATA = path.join(RUN_ROOT, 'appdata')
+
+const mod = await import(pathToFileURL(path.join(HERE, '..', 'plugin', 'index.js')).href)
+
+// ---- 构造"桥正在跑、且第 6 笔没跑完"的状态 --------------------------------
+const now = Math.floor(Date.now() / 1000)
+const write = (name, obj) => fs.writeFileSync(path.join(DIR, name), JSON.stringify(obj, null, 2))
+
+write('svdsh-hb-sv.json', {
+  host: 'sv', hostName: 'Synthesizer V Studio 2 Pro', version: '2.3.0',
+  hostVersionNumber: 131840, isSV2: true, indexBase: 1, dir: DIR, bridge: '0.8.0',
+  protocol: 1, lua: 'Lua 5.4', timer: 'SV',
+  ops: ['ping', 'get_context', 'snapshot', 'restore', 'selftest'],
+  panel: true, session: 12345, reqSeen: 6, opsRun: 5, ticks: 999, pollErrors: 0, ts: now,
+})
+write('svdsh-lastop-sv.json', {
+  stage: 'running', id: 'req-6', op: 'quantize', session: 12345, reqSeen: 6, opsRun: 5, ts: now,
+})
+write('svdsh-snapshots-sv.json', {
+  seq: 3,
+  items: [
+    { id: 's1', ts: now - 300, groupName: 'Main', noteCount: 462, notes: [] },
+    { id: 's2', ts: now - 120, label: 'split_notes', groupName: 'Main', noteCount: 464, notes: [] },
+    { id: 's3', ts: now - 10, label: 'quantize', groupName: 'Main', noteCount: 462, notes: [] },
+  ],
+})
+write('svdsh-boot-sv.json', { ok: true, bridge: '0.8.0', dir: DIR, ts: now - 60 })
+
+// ---- 桩 ctx --------------------------------------------------------------
+const tools = []
+const routes = []
+const makeEffect = () => (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} }
+const ctx = {
+  get: () => undefined,
+  effect: makeEffect(),
+  on: () => () => {},
+  inject: (_names, cb) => cb({
+    effect: makeEffect(), on: () => () => {}, get: () => undefined,
+    webServer: { register: (r) => { routes.push(r); return () => {} } },
+    systemPrompt: { section: () => () => {} },
+    interval: () => () => {}, setInterval: () => () => {},
+  }),
+  tools: { register: (def) => { tools.push(def); return () => {} } },
+}
+// 超时压到 400ms:桥是模拟的(没有对端),别让每一步都等满 12 秒
+mod.apply(ctx, { timeoutMs: 400, pollMs: 20 })
+
+const exec = { agent: { id: 'session-plugin-tests' }, signal: new AbortController().signal }
+const call = async (name, args) => {
+  const t = tools.find((x) => x.name === name)
+  try {
+    return { ok: true, value: await t.execute(args ?? {}, exec) }
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
+}
+
+let failed = 0
+const check = (label, cond, got) => {
+  if (cond) console.log(`  PASS  ${label}`)
+  else {
+    failed += 1
+    console.log(`  FAIL  ${label}${got === undefined ? '' : `  (got ${JSON.stringify(got)})`}`)
+  }
+}
+
+console.log('plugin-tests — 插件半边行为测试(模拟的桥状态)')
+console.log(`  假 home: ${HOME}`)
+console.log(`  通道目录: ${DIR}`)
+console.log('')
+
+console.log('— 桥在线 + 有快照 + 面包屑停在 running')
+const st = (await call('sv_status')).value
+check('online 判为真', st.online === true, st.online)
+check('读到 3 份快照', st.snapshots.count === 3, st.snapshots.count)
+check('最近一份是 s3 / quantize / 462 音',
+  st.snapshots.latest.id === 's3' && st.snapshots.latest.label === 'quantize' &&
+  st.snapshots.latest.noteCount === 462, st.snapshots.latest)
+check('判成"冻住"并指名 op=quantize', st.frozen && st.frozen.op === 'quantize', st.frozen)
+check('hint 给出可照做的处置', /模态框|中止所有脚本/.test(st.hint), st.hint)
+check('lastOp 一起回出来', st.lastOp && st.lastOp.op === 'quantize' && st.lastOp.stage === 'running',
+  st.lastOp)
+
+console.log('\n— 自动快照失败必须被记下来(而不是静默)')
+const tr = await call('sv_transpose', { semitones: 2, expectFp: 'deadbeef' })
+check('写操作本身失败(模拟的桥没有响应)', tr.ok === false)
+const st2 = (await call('sv_status')).value
+check('lastSnapshotError 被记下且指名 op=transpose_selected',
+  st2.lastSnapshotError && st2.lastSnapshotError.op === 'transpose_selected', st2.lastSnapshotError)
+
+console.log('\n— sv_doctor:桥"在线"但自检打不通 ⇒ 如实报错 + nextSteps')
+const doc = (await call('sv_doctor')).value
+check('verdict 是告警而不是 OK', /有问题/.test(doc.verdict), doc.verdict)
+check('仍然报告了快照与肇事 op',
+  doc.snapshots.count === 3 && doc.frozen && doc.frozen.op === 'quantize')
+check('selftest 打不通时不假装通过',
+  doc.selftest === null && typeof doc.selftestError === 'string', doc.selftestError)
+check('nextSteps 里含"冻住"那条', doc.nextSteps.some((s) => /模态框|冻住/.test(s)), doc.nextSteps)
+
+console.log('\n— 桥离线(心跳被删掉):不能再说是"冻住"')
+fs.rmSync(path.join(DIR, 'svdsh-hb-sv.json'), { force: true })
+const st3 = (await call('sv_status')).value
+check('online 判为假', st3.online === false, st3.online)
+check('frozen 归 null —— 面包屑是上次运行的残留,不是证据', st3.frozen === null, st3.frozen)
+check('hint 告诉用户去哪里跑桥', /运行 \[脚本\]/.test(st3.hint), st3.hint)
+const doc2 = (await call('sv_doctor')).value
+check('doctor 的 nextSteps 第一条是"没有心跳文件"',
+  /心跳文件/.test(doc2.nextSteps[0] || ''), doc2.nextSteps)
+
+console.log('\n— 状态路由(浏览器半边拿的就是它)')
+const route = routes.find((r) => r.path === '/dsh-sv-bridge/status')
+check('路由注册了', Boolean(route))
+const ask = (addr) => new Promise((resolve) => {
+  route.handler({ socket: { remoteAddress: addr } },
+    { writeHead: () => {}, end: (t) => resolve(t) })
+})
+const snap = JSON.parse(await ask('127.0.0.1'))
+check('回环来源能拿到 JSON', snap.ok === true)
+check('JSON 里有 snapshots / lastOp / frozen 三件',
+  'snapshots' in snap && 'lastOp' in snap && 'frozen' in snap, Object.keys(snap))
+check('非回环来源被 403 挡掉', /loopback only/.test(await ask('10.0.0.7')))
+
+console.log('')
+if (failed === 0) {
+  console.log('OK: 插件半边行为全部通过')
+  process.exit(0)
+}
+console.log(`${failed} 项失败`)
+process.exit(1)

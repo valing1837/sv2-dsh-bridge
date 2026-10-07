@@ -4,9 +4,9 @@
 
 [![CI](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/valing1837/sv2-dsh-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Ops](https://img.shields.io/badge/ops-43-blue.svg)](plugin/sv/DSHBridge.lua)
-[![Tests](https://img.shields.io/badge/tests-41%2F41-brightgreen.svg)](tools/harness.mjs)
-[![Mutants](https://img.shields.io/badge/mutants-54%2F54%20caught-brightgreen.svg)](tools/check-mutants.mjs)
+[![Ops](https://img.shields.io/badge/ops-46-blue.svg)](plugin/sv/DSHBridge.lua)
+[![Tests](https://img.shields.io/badge/tests-44%2F44-brightgreen.svg)](tools/harness.mjs)
+[![Mutants](https://img.shields.io/badge/mutants-58%2F58%20caught-brightgreen.svg)](tools/check-mutants.mjs)
 
 ---
 
@@ -30,8 +30,8 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 └──────────────────────────┘                          └──────────────────────────┘
 ```
 
-- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,43 个 op)和 JS(侧栏面板)
-- **`plugin/`** —— 跑在 DSH 里的宿主插件(9 个工具 + 常驻提示词)
+- **`plugin/sv/`** —— 跑在 SV2 里的 Lua(桥,46 个 op)和 JS(侧栏面板)
+- **`plugin/`** —— 跑在 DSH 里的宿主插件(11 个工具 + 常驻提示词 + 输入框下的状态卡)
 
 没有网络通信:两边靠**固定文件名的轮询**交换 JSONL。
 这绕开了 SV2 沙箱不给 socket 的限制。
@@ -40,7 +40,7 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 
 ## 能做什么
 
-43 个 op,按用途分组:
+46 个 op,按用途分组:
 
 | 类别 | op |
 |---|---|
@@ -51,10 +51,20 @@ Synthesizer V Studio 2 的脚本 API 只给了 `SV` 一个全局对象。能做�
 | **调参** | `auto_tone_shift` · `auto_expression` · `get_automation` · `set_automation` · `get_voice` · `set_voice` |
 | **声库** | `list_voices` · `list_voice_presets` |
 | **音频** | `get_audio_tracks` · `align_audio` |
+| **安全网** | `snapshot` · `restore` · `selftest` |
 | **宿主** | `get_computed` · `transport` · `panel_ask` · `chat_send` · `ping` · `stop` |
 
-三个 op 值得一提:
+五个 op 值得一提:
 
+- **`snapshot` / `restore`** —— **写错了能回去**。每个改音符的写操作之前,插件会自动留一份
+  组状态;写出来的东西"合法但不对"时,一句 `sv_undo` 回到写之前,不用手工反向改。
+  覆盖音符层(起始 / 时值 / 音高 / 歌词),**不含**属性层、组的增删、自动化曲线和声音属性 ——
+  这些在返回里逐条写明,免得以为它能救一切。目标组按快照里的 **UUID 全局找**,
+  所以你中途切到别的组了也能回滚对。
+- **`selftest`** —— 全链路自检:目录可写 · 原子替换 · 读回 · 删除 · 心跳 · 日志 ·
+  计时链 · 宿主与工程可读 · 快照存储,逐项给 ok/detail。
+  「桥不在线」有七八种原因(没跑 / 被关 / 两端目录不一致 / 心跳过期 / 被模态框冻住…),
+  用户在聊天里描述不出来 —— 让桥自己验一遍,DSH 侧的 `sv_doctor` 就能给一句能照做的结论。
 - **`get_summary`** —— 只回统计量。500 个音符的明细有 20~50 KB,会把调用方的上下文冲垮;
   这个 op 回音符数、音高范围、**重叠数**、间隙数、音节数,一行搞定。
 - **`auto_tone_shift`** —— 按音高把超出声库音域的**两端往中间拉**,而不是整曲移调。
@@ -109,10 +119,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-sv-scripts.ps1
 ```bash
 cd tools
 npm install
-node harness.mjs           # 41 条行为测试
-node check-mutants.mjs     # 54 个变异,漏一个就红
+node harness.mjs           # 44 条行为测试
+node check-mutants.mjs     # 58 个变异,漏一个就红
 node check-lua.mjs ../plugin/sv/DSHBridge.lua
 node check-plugin.mjs
+node check-client.mjs      # 浏览器半边:主题 token / 字形 / DOM 纪律
+node plugin-tests.mjs      # 插件半边行为(模拟的桥状态,20 条断言)
 ```
 
 ---
@@ -158,11 +170,11 @@ node check-plugin.mjs
 
 ## 测试
 
-**41 条行为测试**,跑在一个离线装置上:
+**44 条行为测试**,跑在一个离线装置上:
 [fengari](https://github.com/fengari-lua/fengari)(纯 JS 的 Lua 5.4)执行真的桥代码,
 配一个假宿主(`tools/fake-sv.lua`),不需要开 SV2。
 
-**54 个变异,每个都必须让测试变红。**
+**58 个变异,每个都必须让测试变红。**
 
 一个从没红过的测试套件不是证据。`tools/make-mutants.mjs` 把**真实发生过的 bug**
 打进桥的副本,`check-mutants.mjs` 逐个跑,要求全部被抓到:
@@ -170,23 +182,38 @@ node check-plugin.mjs
 ```
 caught   group-move-wrong-index.lua
 caught   split-notes-ascending.lua
-caught   tempo-mark-reads-positionblick.lua
+caught   restore-remove-ascending.lua
+caught   dir-candidates-windows-only.lua
 ...
-54/54 个变异被抓到
+58/58 个变异被抓到
 ✓ 测试套件确实会失败(不是永远绿的摆设)
 ```
 
 这套纪律已经抓到过自己的失效两次:两个变异的替换串在加了新代码后
 **匹配到两处**,等于什么都没改 —— 现在生成器要求每条替换**恰好命中一次**。
 
-**四道守卫**(`check-lua.mjs` / `check-file.mjs`):
+**五道守卫**:
 
 | 守卫 | 拦什么 |
 |---|---|
-| 元数据 | `SidePanelSection` 的脚本名含中文会被宿主拒绝加载 |
-| **ES5 兼容** | `f(a,b,)` 尾逗号是 ES2017 —— `node --check` 放行,但 Duktape 拒绝 |
-| **emoji** | SV2 侧栏字体不渲染 emoji,会显示成乱码 |
-| 编码 | BOM / 编码损坏(仓库里有大量中文) |
+| `check-lua.mjs` · 元数据 | `SidePanelSection` 的脚本名含中文会被宿主拒绝加载 |
+| `check-lua.mjs` · **ES5 兼容** | `f(a,b,)` 尾逗号是 ES2017 —— `node --check` 放行,但 Duktape 拒绝 |
+| `check-lua.mjs` · **emoji** | SV2 侧栏字体不渲染 emoji,会显示成乱码 |
+| `check-file.mjs` · 编码 | BOM / 编码损坏(仓库里有大量中文) |
+| `check-client.mjs` · 浏览器半边 | **写死的色值**(暗色下会瞎眼)· 非 `--dsw-*` 变量 · emoji · 碰组件外的 DOM · 槽位注册缺件 |
+
+最后那道是给"界面好看"立的规矩:client.js 是手写的、没有构建步骤也没有类型检查,
+它错了没人会告诉你 —— 只会在 DSH 里安静地难看。所以把要求写成判据,
+连**"状态卡必须显示能不能回滚 / 卡在哪个 op / 快照失败过没有"**都一起钉住。
+
+**插件半边也有行为测试**(`plugin-tests.mjs`,20 条断言):在 `.harness-run/` 里造一份
+假的 home 与通道目录,把心跳 / 面包屑 / 快照栈写成**精心构造的那几种状态**,
+再真的去调 `sv_status` / `sv_doctor` / `sv_transpose`,断言输出。
+`check-plugin.mjs` 只验"工具定义合法",不跑业务逻辑 —— 而插件侧最容易错的就是
+**状态判断**(桥算不算在线?面包屑算不算"冻住"?自动快照失败了有没有说出来?)。
+这道测试第一次跑就抓到一个:桥**没在跑**时,盘上残留的 `stage=running` 面包屑
+会被误判成"宿主被模态框冻住了" —— 而这两件事的处置完全不同。
+现在"没有心跳就**不下这个结论**"也成了断言。
 
 ---
 
@@ -220,6 +247,8 @@ caught   tempo-mark-reads-positionblick.lua
 | `io.popen` 已封锁 | 它冻过宿主 ⇒ 声库名只能问用户 |
 | `pitchDelta` 不要碰 | 它是手画音高线,写它会覆盖转录的演唱 |
 | `mouthOpening` 本机不支持 | 文档列了但宿主没有 —— **文档 ≠ 本机能力** |
+| **macOS 未经真机验证** | 桥已经不再依赖 Windows 专有的环境变量与分隔符(会挑 `~/.dsh/sv-bridge`),判据由离线测试台在**两个平台**上守着;但真机只有 Windows 跑过 |
+| 快照只覆盖音符层 | `sv_undo` 不含属性层、组的增删、自动化曲线、声音属性 —— 返回里逐条写明 |
 
 ---
 
@@ -227,15 +256,18 @@ caught   tempo-mark-reads-positionblick.lua
 
 ```
 plugin/              DSH 宿主侧 + SV2 侧脚本
-  index.js             9 个 sv_* 工具 + 常驻提示词
-  sv/DSHBridge.lua     桥本体(43 个 op)
+  index.js             11 个 sv_* 工具 + 常驻提示词
+  client.js            输入框下的状态卡(浏览器半边)
+  sv/DSHBridge.lua     桥本体(46 个 op)
   sv/DSHPanel.js       侧栏面板
 tools/               离线测试与工具
-  harness.mjs          41 条行为测试
+  harness.mjs          44 条行为测试
   make-mutants.mjs     生成"故意改坏"的副本
   check-mutants.mjs    要求每个变异都被抓到
   check-lua.mjs        语法 + 元数据 + ES5 + emoji 守卫
   check-file.mjs       编码守卫
+  check-client.mjs     浏览器半边守卫(主题 token / 字形 / DOM)
+  plugin-tests.mjs     插件半边行为测试(模拟的桥状态)
   analyze-audio.py     BPM / 首拍分析
   analyze-chords.py    和弦分析
   import-musicxml.py   乐谱导入(9 道护栏 + 77 条自测)

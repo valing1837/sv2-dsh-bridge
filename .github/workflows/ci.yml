@@ -32,13 +32,21 @@ jobs:
         working-directory: tools
         run: |
           node check-lua.mjs ../plugin/sv/DSHBridge.lua ../plugin/sv/DSHPanel.js
-          node check-file.mjs ../plugin/sv/DSHBridge.lua ../plugin/sv/DSHPanel.js ../plugin/index.js ../README.md
+          node check-file.mjs ../plugin/sv/DSHBridge.lua ../plugin/sv/DSHPanel.js ../plugin/index.js ../plugin/client.js ../README.md
 
       - name: Plugin tool definitions
         working-directory: tools
         run: node check-plugin.mjs
 
-      - name: Behavioural harness (41 tests)
+      - name: Browser half (theme tokens / glyphs / DOM discipline)
+        working-directory: tools
+        run: node check-client.mjs
+
+      - name: Plugin behaviour (offline, simulated bridge state)
+        working-directory: tools
+        run: node plugin-tests.mjs
+
+      - name: Behavioural harness (44 tests)
         working-directory: tools
         run: node harness.mjs
 

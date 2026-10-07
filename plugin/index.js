@@ -47,7 +47,34 @@ const FILE = {
   chatIn: 'svdsh-chat-in.jsonl',
   chatOut: 'svdsh-chat-out.json',
   state: 'svdsh-plugin-state.json',
+  /** 桥写的快照栈(最近 8 份)。插件只读它 —— 不必为"能不能回滚"多跑一次桥。 */
+  snapshots: 'svdsh-snapshots-sv.json',
+  /** 桥的肇事面包屑:每笔请求执行前写 stage=running,跑完改 done。 */
+  lastOp: 'svdsh-lastop-sv.json',
 }
+
+/**
+ * 这些 op 会改**一个组里的音符**,所以调用前先自动留一份快照。
+ *
+ * ⚠️ 为什么只列这些:`restore`/`snapshot` 自己不能触发(否则回滚会先把"要回滚的状态"
+ *    再存一份,第二次回滚就回不去了);组级操作(新建/删除组)、自动化曲线、声音属性
+ *    也不在里面 —— 快照只覆盖音符层,列进来会给人"回滚能救它"的错觉。
+ */
+const SNAPSHOT_BEFORE = new Set([
+  'delete_notes',
+  'split_notes',
+  'transpose_selected',
+  'set_lyrics',
+  'apply_lyrics',
+  'align_lyrics',
+  'set_note_attrs',
+  'quantize',
+  'apply_ornaments',
+  'write_pit',
+  'clear_pit',
+  'auto_tone_shift',
+  'auto_expression',
+])
 
 const DEFAULTS = {
   pollMs: 40,
@@ -370,15 +397,17 @@ async function deliverToSession(ctx, sessionId, text) {
  * 「schema 缺 type:object 会打爆整个会话」这个坑不该再靠真机发现。
  */
 export function buildTools(deps) {
-  const { dir, state, cfg, setupError, requireDir, saveStateNow, pushToPanel, autoBind, callOp } =
-    deps
+  const {
+    dir, state, cfg, setupError, requireDir, saveStateNow, pushToPanel, autoBind, callOp,
+    readSnapshots, readLastOp, frozenCrumb, getLastSnapshotError,
+  } = deps
   void cfg
   void requireDir
 
   const statusTool = {
     name: 'sv_status',
     description:
-      'Report the Synthesizer V Studio bridge: whether the in-host bridge is running, the host version, the ops it advertises, which DSH session receives messages typed in SV2, and how many SV2 messages are still queued. Call this first when anything SV-related misbehaves.',
+      'Report the Synthesizer V Studio bridge: whether the in-host bridge is running, the host version, the ops it advertises, which DSH session receives messages typed in SV2, how many SV2 messages are still queued, and whether a rollback snapshot is available. Call this first when anything SV-related misbehaves.',
     parameters: objectSchema({}),
     output: JSON_OUTPUT,
     async execute(_args, exec) {
@@ -389,6 +418,7 @@ export function buildTools(deps) {
       const ageMs = hb ? Date.now() - Number(hb.ts ?? 0) * 1000 : undefined
       const online = Boolean(hb) && Number.isFinite(ageMs) && ageMs <= HB_STALE_MS
       const staleness = scriptStaleness(boot?.ts)
+      const frozen = frozenCrumb(hb)
       return {
         online,
         dir: base ?? null,
@@ -407,12 +437,25 @@ export function buildTools(deps) {
         lastBoot: boot ?? null,
         boundSession: state.boundSession ?? null,
         queuedFromSv: state.pending.length,
-        hint: !online
-          ? '桥离线:在 SV2 里运行 [脚本] > [DSH] > [DSH Bridge]。注意常驻脚本不会热更,改过桥要重跑。'
-          : staleness.stale
-            ? '⚠️ 部署的脚本文件比桥的启动时间新 —— 宿主里跑的是**旧实例**。' +
-              '请在 SV2 里 [脚本] > [中止所有脚本],再重新运行 DSH Bridge。'
-            : '桥在线,可以直接用 sv_context / sv_notes 等工具。',
+        // 可回滚性:桥写的快照栈(只读文件,不用再跑一次桥)
+        snapshots: readSnapshots(),
+        // 自动快照失败过就说出来 —— "以为能回滚"是最坏的那种静默
+        lastSnapshotError: (() => {
+          const e = getLastSnapshotError ? getLastSnapshotError() : null
+          return e ? { op: e.op, message: e.message } : null
+        })(),
+        // 肇事面包屑:被模态框冻住时,这一条能指名是哪个 op
+        lastOp: readLastOp(),
+        frozen,
+        hint: frozen
+          ? `⚠️ 宿主可能被 **${frozen.op}** 弹的模态框冻住了(面包屑停在 stage=running)。` +
+            '请到 SV2 里关掉那个错误框,存盘后 [中止所有脚本] 再重跑 DSH Bridge。'
+          : !online
+            ? '桥离线:在 SV2 里运行 [脚本] > [DSH] > [DSH Bridge]。注意常驻脚本不会热更,改过桥要重跑。'
+            : staleness.stale
+              ? '⚠️ 部署的脚本文件比桥的启动时间新 —— 宿主里跑的是**旧实例**。' +
+                '请在 SV2 里 [脚本] > [中止所有脚本],再重新运行 DSH Bridge。'
+              : '桥在线,可以直接用 sv_context / sv_notes 等工具。',
       }
     },
   }
@@ -582,6 +625,127 @@ export function buildTools(deps) {
     },
   }
 
+  const undoTool = {
+    name: 'sv_undo',
+    description:
+      'Roll the current Synthesizer V Studio group back to a snapshot. A snapshot is taken AUTOMATICALLY before every note-level write (delete/split/transpose/lyrics/attrs/quantize/pitch curves/ornaments/auto-tune), so this is the safety net for "the write was valid but wrong". With no `id` it restores the most recent snapshot; sv_status lists what is available. Coverage is the note layer only (onset/duration/pitch/lyrics) — NOT the attribute layer, group create/delete, automation curves or voice settings.',
+    parameters: objectSchema({
+      id: {
+        type: 'string',
+        description:
+          'Snapshot id from sv_status (e.g. "s3"). Omit to roll back to the most recent one.',
+      },
+    }),
+    output: JSON_OUTPUT,
+    async execute(args, exec) {
+      autoBind(exec)
+      const payload = {}
+      if (typeof args?.id === 'string' && args.id.trim().length > 0) payload.id = args.id.trim()
+      return callOp('restore', payload, exec)
+    },
+  }
+
+  const doctorTool = {
+    name: 'sv_doctor',
+    description:
+      'Diagnose the Synthesizer V Studio bridge end to end and return a checklist plus the next action to take. Runs an active self-test inside the host (channel dir writable, atomic rename-over-existing, read-back, delete, heartbeat, log, timer chain, host/project readable, snapshot store) and adds what only this side can see: heartbeat freshness, whether the deployed script is newer than the running bridge, whether both ends agree on the channel directory, whether the host is frozen behind a modal dialog, and whether a rollback snapshot exists. Use it instead of guessing whenever the bridge looks offline or a tool times out.',
+    parameters: objectSchema({}),
+    output: JSON_OUTPUT,
+    async execute(_args, exec) {
+      autoBind(exec)
+      const base = dir
+      const hb = base ? readJson(path.join(base, FILE.hb)) : undefined
+      const boot = base ? readJson(path.join(base, FILE.boot)) : undefined
+      const ageMs = hb ? Date.now() - Number(hb.ts ?? 0) * 1000 : undefined
+      const online = Boolean(hb) && Number.isFinite(ageMs) && ageMs <= HB_STALE_MS
+      const staleness = scriptStaleness(boot?.ts)
+      const dirMatches = base && hb?.dir ? path.resolve(hb.dir) === path.resolve(base) : null
+
+      let selftest = null
+      let selftestError = null
+      if (online) {
+        try {
+          selftest = await callOp('selftest', {}, exec)
+        } catch (error) {
+          selftestError = String(error?.message ?? error)
+        }
+      }
+
+      const nextSteps = []
+      if (!base) {
+        nextSteps.push(
+          '插件没能准备好通道目录:' +
+            (setupError ? String(setupError.message ?? setupError) : '未知原因') +
+            ' —— 确认 %USERPROFILE%\\.dsh(或 macOS 的 ~/.dsh)可写,然后重装/重启插件。',
+        )
+      }
+      if (!hb) {
+        nextSteps.push(
+          '没有心跳文件 ⇒ 宿主里还没运行过桥:SV2 → [脚本] > [DSH] > [DSH Bridge]。',
+        )
+      } else if (!online) {
+        nextSteps.push(
+          `心跳已过期(${Math.round((ageMs ?? 0) / 1000)}s,阈值 ${HB_STALE_MS / 1000}s)` +
+            ' ⇒ 桥被关掉了、或宿主被模态框冻住。先在 SV2 里关掉错误框,再重跑桥。',
+        )
+      }
+      if (dirMatches === false) {
+        nextSteps.push(
+          `⚠️ 两端目录不一致:插件用 ${base},桥自报 ${hb?.dir} ⇒ 请求会被永远忽略。` +
+            '让插件重新建目录(重启插件)后在宿主里重跑桥。',
+        )
+      }
+      if (staleness.stale) {
+        nextSteps.push(
+          '部署的脚本文件比桥的启动时间新 ⇒ 宿主里跑的是**旧实例**:' +
+            '[中止所有脚本] 再重新运行 DSH Bridge。',
+        )
+      }
+      const frozen = frozenCrumb(hb)
+      if (frozen) {
+        nextSteps.push(
+          `宿主可能被 **${frozen.op}** 弹的模态框冻住了(面包屑停在 stage=running,id=${frozen.id})。`,
+        )
+      }
+      if (selftest && selftest.ok === false) {
+        for (const c of selftest.checks ?? []) {
+          if (c.ok !== true) nextSteps.push(`桥自检未通过:${c.name} —— ${c.detail}`)
+        }
+      }
+      if (selftestError) nextSteps.push(`自检本身失败:${selftestError}`)
+      if (nextSteps.length === 0) {
+        nextSteps.push('没发现问题。要动工程就直接用 sv_context / sv_notes。')
+      }
+
+      return {
+        verdict:
+          online && dirMatches !== false && !staleness.stale && !frozen && (!selftest || selftest.ok)
+            ? 'OK:桥在线且自检通过'
+            : '⚠️ 有问题 —— 看 nextSteps',
+        online,
+        dir: base ?? null,
+        dirMatches,
+        bridgeVersion: hb?.bridge ?? null,
+        hostName: hb?.hostName ?? null,
+        hostVersion: hb?.version ?? null,
+        heartbeatAgeSeconds: Number.isFinite(ageMs) ? Math.round(ageMs / 1000) : null,
+        opCount: Array.isArray(hb?.ops) ? hb.ops.length : 0,
+        scriptStaleness: staleness,
+        frozen,
+        lastOp: readLastOp(),
+        snapshots: readSnapshots(),
+        lastSnapshotError: (() => {
+          const e = getLastSnapshotError ? getLastSnapshotError() : null
+          return e ? { op: e.op, message: e.message } : null
+        })(),
+        lastBoot: boot ?? null,
+        selftest,
+        selftestError,
+        nextSteps,
+      }
+    },
+  }
+
   return [
     statusTool,
     contextTool,
@@ -591,6 +755,8 @@ export function buildTools(deps) {
     attrsTool,
     bindTool,
     sayTool,
+    undoTool,
+    doctorTool,
     callTool,
   ]
 }
@@ -633,7 +799,102 @@ export function apply(ctx, config) {
     if (dir) saveState(dir, state)
   }
 
-  const callOp = (op, args, exec) => callBridge(requireDir(), op, args, exec?.signal, cfg)
+  // ---- 通道目录里的两个只读观察点(不跑桥,直接读文件) ----------------------
+
+  /** 桥写的快照栈。sv_status / sv_doctor / 状态路由共用。 */
+  function readSnapshots() {
+    if (!dir) return { count: 0, max: null, latest: null }
+    const raw = readJson(path.join(dir, FILE.snapshots))
+    const items = Array.isArray(raw?.items) ? raw.items : []
+    const latest = items.length > 0 ? items[items.length - 1] : null
+    return {
+      count: items.length,
+      max: 8,
+      latest: latest
+        ? {
+            id: latest.id ?? null,
+            ts: latest.ts ?? null,
+            label: latest.label ?? null,
+            groupName: latest.groupName ?? null,
+            noteCount: latest.noteCount ?? null,
+          }
+        : null,
+    }
+  }
+
+  /** 桥的肇事面包屑:每笔请求执行前写 stage=running,跑完改 done。 */
+  function readLastOp() {
+    if (!dir) return null
+    const raw = readJson(path.join(dir, FILE.lastOp))
+    if (!raw || typeof raw.op !== 'string') return null
+    return {
+      stage: raw.stage ?? null,
+      op: raw.op,
+      id: raw.id ?? null,
+      ts: raw.ts ?? null,
+      session: raw.session ?? null,
+      reqSeen: raw.reqSeen ?? null,
+      opsRun: raw.opsRun ?? null,
+    }
+  }
+
+  /**
+   * 这条面包屑是不是「**当前这次桥运行**、且那一笔**没跑完**」?
+   *
+   * ⚠️ 没有心跳就**不下这个结论**(返回 null)。面包屑是桥自己写的,它留在盘上
+   *    不会自己消失 —— 桥被正常停掉、或者用户根本没跑桥时,盘上照样有一份
+   *    stage=running 的旧文件。只看面包屑会把"桥没在跑"误判成"宿主被冻住了",
+   *    而这两件事的处置完全不同(前者去跑桥,后者去关模态框)。
+   *
+   * 三条互校,缺了就会冤枉人:
+   *   · 没有心跳 ⇒ 不判(不知道);
+   *   · 面包屑的 session ≠ 心跳的 session ⇒ 那是**上一次**桥运行留下的;
+   *   · 心跳的 opsRun ≥ 面包屑的 reqSeen ⇒ 那一笔**已经跑完了**(opsRun 在 op 跑完才自增)。
+   * 返回 null 或 { op, id, ts }。
+   */
+  function frozenCrumb(hb) {
+    if (!hb) return null
+    const c = readLastOp()
+    if (!c || c.stage !== 'running') return null
+    if (typeof hb.session === 'number' && typeof c.session === 'number' &&
+        hb.session !== c.session) {
+      return null
+    }
+    if (typeof hb.opsRun === 'number' && typeof c.reqSeen === 'number' &&
+        hb.opsRun >= c.reqSeen) {
+      return null
+    }
+    return { op: c.op, id: c.id, ts: c.ts }
+  }
+
+  let lastSnapshotError = null
+  const getLastSnapshotError = () => lastSnapshotError
+
+  const callBridgeRaw = (op, args, exec) => callBridge(requireDir(), op, args, exec?.signal, cfg)
+
+  /**
+   * 写操作之前**自动留一份快照**(见 SNAPSHOT_BEFORE)。
+   *
+   * ⚠️ 快照失败**不阻断写入**:桥偶尔读不到组(比如当前没有可编辑的组)不该让
+   *    "什么都干不了"。但**绝不静默** —— 记在 lastSnapshotError 里,sv_status /
+   *    sv_doctor 都会显示出来。用户以为能回滚、其实回不去,是最坏的一种。
+   */
+  const callOp = async (op, args, exec) => {
+    if (SNAPSHOT_BEFORE.has(op)) {
+      try {
+        const snapArgs = { label: op }
+        if (args && typeof args === 'object') {
+          if (args.trackIndex !== undefined) snapArgs.trackIndex = args.trackIndex
+          if (args.groupIndex !== undefined) snapArgs.groupIndex = args.groupIndex
+        }
+        await callBridgeRaw('snapshot', snapArgs, exec)
+        lastSnapshotError = null
+      } catch (error) {
+        lastSnapshotError = { op, message: String(error?.message ?? error), ts: Date.now() }
+      }
+    }
+    return callBridgeRaw(op, args, exec)
+  }
 
   /** 往 SV2 侧栏的信息框追加一行。桥隔拍把 chat-out.json 并进 scriptData。 */
   function pushToPanel(text) {
@@ -664,6 +925,10 @@ export function apply(ctx, config) {
     pushToPanel,
     autoBind,
     callOp,
+    readSnapshots,
+    readLastOp,
+    frozenCrumb,
+    getLastSnapshotError,
   })
 
   for (const tool of tools) {
@@ -691,6 +956,13 @@ export function apply(ctx, config) {
       scriptStale: staleness.stale === true,
       boundSession: state.boundSession ?? null,
       queuedFromSv: state.pending.length,
+      // 徽标要多显示的三件事:能回滚吗 · 卡在哪个 op · 自动快照有没有失败过
+      snapshots: readSnapshots(),
+      lastOp: readLastOp(),
+      frozen: frozenCrumb(hb),
+      lastSnapshotError: lastSnapshotError
+        ? { op: lastSnapshotError.op, message: lastSnapshotError.message }
+        : null,
     }
   }
 
@@ -744,9 +1016,14 @@ export function apply(ctx, config) {
         text: [
           'Synthesizer V Studio 2 通过 dsh-sv-bridge 插件接入。',
           '先 sv_status 看桥在不在线;不在线就让用户去 SV2 里运行 [脚本] > [DSH] > [DSH Bridge]。',
+          '桥"看起来不对"时用 **sv_doctor** —— 它会跑一次宿主内自检,并给出下一步该做什么,',
+          '比你逐条猜(没跑 / 被关 / 目录不一致 / 脚本过期 / 被模态框冻住)快得多。',
           '任何写入之前先 sv_notes 拿到 fp,并把同一个 fp 原样作为 expectFp 传回去;',
           '被拒成 STALE_SELECTION 说明用户在宿主里改过工程,重新读一次再写,不要重试同一个 fp。',
           '桥一次只能处理一个请求,不要并发下发;写操作不要"超时就重试"。',
+          '**每个改音符的写操作之前,插件会自动留一份快照**;写错了(写得对但结果不对)用',
+          '**sv_undo** 回到写之前 —— 别急着手动反向改。快照只覆盖音符层(onset/时值/音高/歌词),',
+          '不含属性层、组的增删、自动化曲线和声音属性,别把它当万能撤销。',
           '',
           '## SV2 调参标准流程("全参")',
           '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',

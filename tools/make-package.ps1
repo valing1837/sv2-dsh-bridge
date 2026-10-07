@@ -48,6 +48,8 @@ try {
   & $node harness.mjs 2>&1 | Select-String -Pattern 'passed$' | ForEach-Object { "  $_" }
   & $node check-lua.mjs '..\plugin\sv\DSHBridge.lua' 2>&1 | ForEach-Object { "  $_" }
   & $node check-plugin.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
+  & $node check-client.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
+  & $node plugin-tests.mjs 2>&1 | Select-String -Pattern 'OK:' | ForEach-Object { "  $_" }
 } finally {
   Pop-Location
 }

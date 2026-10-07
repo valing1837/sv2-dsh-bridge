@@ -169,7 +169,19 @@ DSH ⇄ SV2 桥(常驻 Lua / 文件通道)  v0.1.0
 --            文件以"名字里带反斜杠"的形式创建成功(桥以为目录可用),boot/hb/lastop
 --            全落进那个错位文件名。CI 的 ubuntu job 就是被这条打红的(实测日志:
 --            got ".../userprofile\.dsh\sv-bridge" / want ".../userprofile/.dsh/sv-bridge")。
-local BRIDGE_VERSION = "0.7.1"
+--    0.8.0 = ① **快照 / 回滚**(`snapshot` / `restore`):写操作不可逆,而"整批校验"只
+--               保证不写坏、不保证写得对。现在每次写之前留一份组状态(音符层:
+--               onset/dur/pitch/lyrics),错了 `restore` 一键回到写之前。**范围如实写在
+--               返回里**:不含属性层 / 组级操作 / 自动化曲线 / 声音属性。
+--               目标组按**快照里的 UUID 全局找** —— 用户切到别的组了也能回滚对。
+--            ② **`selftest`**:全链路自检(目录可写 · 原子替换 · 读回 · 删除 · 心跳 ·
+--               日志 · 计时链 · 宿主与工程可读 · 快照存储),逐项给 ok/detail。
+--               存在的意义:「桥不在线」有七八种原因,用户描述不出来,让桥自己验。
+--            ③ **目录发现跨平台**:原来只认 USERPROFILE / TEMP / TMP ⇒ **macOS 上桥
+--               根本起不来**(三个都不存在,候选为空);而 DSH 插件用的是
+--               os.homedir()/os.tmpdir()。现在同时认 HOME / TMPDIR,顺序与插件一致。
+--               这条与 0.7.1 的分隔符是**两个独立**的平台问题。
+local BRIDGE_VERSION = "0.8.0"
 local PROTOCOL = 1
 
 local CFG = {
@@ -478,16 +490,38 @@ local function log(msg)
 end
 
 -- 目录发现:与 DSH 插件**同一套顺序**。Lua 不能 mkdir,所以只挑"已存在且可写"的。
--- 顺序:① %USERPROFILE%\.dsh\sv-bridge(插件建) ② %TEMP%\dsh-sv-bridge(插件建)
-local function pickDir()
+-- 顺序:① <home>/.dsh/sv-bridge(插件建) ② <tmp>/dsh-sv-bridge(插件建)
+--
+-- ⚠️ 平台无关:Windows 读 USERPROFILE / TEMP / TMP,macOS 与 Linux 读 HOME / TMPDIR。
+--    只认 Windows 那几个变量的后果是 **macOS 上桥直接起不来**:三个都不存在 ⇒ 候选为空 ⇒
+--    fatal「找不到可写的通道目录」,而 DSH 插件侧用的是 os.homedir() / os.tmpdir(),
+--    它建好的目录桥永远看不到。这是与 0.7.1 那个分隔符**互相独立**的第二个平台问题。
+--    写成纯函数(注入 getenv)是为了让离线测试台能在 Windows 上验证 macOS 的候选顺序。
+local function dirCandidates(getenv)
   local cands = {}
-  -- ⚠️ 分隔符跟着**目录自己**走(见 sepFor 的说明):写死 "\\" 在 POSIX 上会让探测
-  --    文件以"名字里带反斜杠"的形式创建成功 ⇒ 桥以为目录可用,然后一路写错地方。
-  local up = os.getenv and os.getenv("USERPROFILE")
-  if up and #up > 0 then cands[#cands + 1] = joinPath(joinPath(up, ".dsh"), "sv-bridge") end
-  local tp = os.getenv and (os.getenv("TEMP") or os.getenv("TMP"))
-  if tp and #tp > 0 then cands[#cands + 1] = joinPath(tp, "dsh-sv-bridge") end
-  for _, d in ipairs(cands) do
+  local home = getenv("USERPROFILE") or getenv("HOME")
+  if home and #home > 0 then cands[#cands + 1] = joinPath(joinPath(home, ".dsh"), "sv-bridge") end
+  local tmp = getenv("TEMP") or getenv("TMP") or getenv("TMPDIR")
+  if tmp and #tmp > 0 then cands[#cands + 1] = joinPath(tmp, "dsh-sv-bridge") end
+  return cands
+end
+
+local function envGetenv(name)
+  if type(os) == "table" and type(os.getenv) == "function" then return os.getenv(name) end
+  return nil
+end
+
+-- 兜底临时目录:只用于"还没挑到通道目录就 fatal 了"时落 boot 文件
+local function envTmpDir()
+  local tmp = envGetenv("TEMP") or envGetenv("TMP") or envGetenv("TMPDIR")
+  if tmp and #tmp > 0 then return tmp end
+  return nil
+end
+
+local function pickDir()
+  for _, d in ipairs(dirCandidates(envGetenv)) do
+    -- 分隔符跟着**目录自己**走(见 sepFor 的说明):写死 "\\" 在 POSIX 上会让探测
+    -- 文件以"名字里带反斜杠"的形式创建成功 ⇒ 桥以为目录可用,然后一路写错地方。
     local probe = joinPath(d, "svdsh-wtest.tmp")
     local f = io.open(probe, "w")
     if f then
@@ -4655,6 +4689,347 @@ function OPS.panel_ask(args)
   return { asked = true, id = id, prompt = prompt, choices = clean }
 end
 
+-- ============================================================================
+-- 5b. 快照 / 回滚(0.8.0)
+--
+-- 为什么要有:写操作**不可逆**。「先算完整批再写」只保证"不会写坏",不保证"写得对" ——
+--    改错了用户只能自己 Ctrl+Z,而我们的批量写是一整条撤销步,救不回中间状态。
+--    所以写之前留一份组状态,错了能一键回到写之前。(仓库 CHANGELOG「计划中」第一条。)
+--
+-- ⚠️ 范围,如实写清楚(不夸大):快照只覆盖**一个组**的**音符层** ——
+--    onset / duration / pitch / lyrics。**不含**:
+--      · 属性层(attributes / 音素 / detune / 说唱重音)—— 键不认识时 setAttributes 会弹
+--        模态框,按"不认识的键一律拒"的纪律,这里不碰;
+--      · 组级操作(新建组 / 删组 / 移组)—— 那是另一种回滚;
+--      · 自动化曲线、声音属性、速度/拍号标记 —— 同上。
+--    这些在 snapshot / restore 的返回里都逐条写明,免得用户以为"回滚能救一切"。
+-- ============================================================================
+
+local SNAP_FILE = "svdsh-snapshots-sv.json"
+local SNAP_MAX = 8          -- 保留最近 8 份:够用,又不会把通道目录撑大
+
+local function snapPath() return joinPath(PATH.dir, SNAP_FILE) end
+
+local function snapLoad()
+  local raw = readFile(snapPath())
+  if raw == nil or #raw == 0 then return { seq = 0, items = {} } end
+  local ok, obj = pcall(jdec, raw)
+  if not ok or type(obj) ~= "table" or type(obj.items) ~= "table" then
+    -- 坏文件不静默:当空 store,但留一行日志(用户排障时要能看见)
+    log("快照文件解析失败 ⇒ 当作空 store(" .. tostring(snapPath()) .. ")")
+    return { seq = 0, items = {} }
+  end
+  return obj
+end
+
+local function snapSave(store)
+  return writeAtomic(snapPath(), jenc(store))
+end
+
+-- 组的音符状态(快照的原子单位)
+local function captureNotes(grp)
+  local n = num(call(grp, "getNumNotes")) or 0
+  local notes = {}
+  for i = 1, n do
+    local nt = call(grp, "getNote", i)
+    if nt ~= nil then
+      notes[#notes + 1] = {
+        onset = math.floor(num(call(nt, "getOnset")) or 0),
+        dur = math.floor(num(call(nt, "getDuration")) or 0),
+        pitch = math.floor(num(call(nt, "getPitch")) or 0),
+        lyrics = tostring(call(nt, "getLyrics") or ""),
+      }
+    end
+  end
+  return notes
+end
+
+-- 按 onset 排序的副本(带原下标做稳定 tiebreak)。
+-- 为什么写回前要排序:宿主 `addNote` 是**按 onset 插进组里**的(0.5.9 实测),
+-- 所以"补建缺失音符"这一步只有在**升序**遍历时才落回正确位置。
+local function sortedByOnset(notes)
+  local copy = {}
+  for i = 1, #notes do
+    copy[i] = { onset = notes[i].onset, dur = notes[i].dur, pitch = notes[i].pitch,
+                lyrics = notes[i].lyrics, srcIndex = i }
+  end
+  table.sort(copy, function(a, b)
+    if a.onset == b.onset then return a.srcIndex < b.srcIndex end
+    return a.onset < b.onset
+  end)
+  return copy
+end
+
+-- 按 UUID **全局**找组。
+-- 为什么不能只用"当前组":回滚最常见的场景就是"用户已经切到别的组了",
+-- 那时候按当前组回滚 = 把快照写进错的组里。
+local function findGroupByUuid(uuid)
+  if type(uuid) ~= "string" or #uuid == 0 then return nil, nil end
+  local proj = project()
+  if proj == nil then return nil, nil end
+  local nt = num(call(proj, "getNumTracks")) or 0
+  for ti = 1, nt do
+    local track = call(proj, "getTrack", ti)
+    if track ~= nil then
+      local ng = num(call(track, "getNumGroups")) or 0
+      for gi = 1, ng do
+        local ref = call(track, "getGroupReference", gi)
+        if ref ~= nil then
+          local grp = call(ref, "getTarget")
+          if grp ~= nil and call(grp, "getUUID") == uuid then return ref, grp end
+        end
+      end
+    end
+  end
+  return nil, nil
+end
+
+-- 前向声明:writeHeartbeat 定义在第 8 节(本节之后),而 selftest 要用它。
+-- 和 PANEL_ASK_PUSH 同一套做法。
+local writeHeartbeatRef = nil
+
+-- ---- snapshot ------------------------------------------------------------
+-- 留一份可回滚的组状态。插件侧在**每个写操作之前自动调用**它,也可以手动调。
+-- args: { label?, trackIndex?, groupIndex? }
+function OPS.snapshot(args)
+  args = args or {}
+  local ref, grp
+  if args.groupIndex ~= nil or args.trackIndex ~= nil then
+    ref, grp = groupAt(args.trackIndex or 0, args.groupIndex or 0)
+  else
+    ref, grp = currentGroup()
+  end
+  if grp == nil then
+    error("找不到目标组:当前没有可编辑的组(或指定位置指向的是外部音频)")
+  end
+
+  local notes = captureNotes(grp)
+  local store = snapLoad()
+  store.seq = (tonumber(store.seq) or 0) + 1
+  local item = {
+    id = "s" .. tostring(store.seq),
+    ts = os.time(),
+    label = (type(args.label) == "string" and #args.label > 0) and args.label or nil,
+    groupUuid = call(grp, "getUUID"),
+    groupName = call(grp, "getName"),
+    noteCount = #notes,
+    notes = notes,
+  }
+  store.items[#store.items + 1] = item
+  while #store.items > SNAP_MAX do table.remove(store.items, 1) end
+  if not snapSave(store) then
+    -- 落盘失败**绝不静默**:这份快照不存在,调用方必须知道(否则"以为能回滚")
+    error("快照写盘失败:" .. tostring(snapPath()) .. " 不可写 ⇒ 回滚将没有依据")
+  end
+  return {
+    id = item.id, ts = item.ts, label = item.label,
+    groupName = item.groupName, groupUuid = item.groupUuid,
+    noteCount = item.noteCount, kept = #store.items, max = SNAP_MAX,
+    covers = "onset / duration / pitch / lyrics",
+    notCovered = "属性层(音素 / detune / attributes)、组的新建与删除、自动化曲线、声音属性、速度与拍号标记",
+    note = "回滚用 restore {}(最近一份)或 restore { id = \"" .. item.id .. "\" }",
+  }
+end
+
+-- ---- restore -------------------------------------------------------------
+-- 把组恢复成某份快照的样子。默认**最近一份**。
+-- args: { id?, trackIndex?, groupIndex? }
+function OPS.restore(args)
+  args = args or {}
+  local store = snapLoad()
+  if #store.items == 0 then
+    error("没有任何快照可回滚。快照由写操作自动产生(插件侧),也可以手动调 snapshot。")
+  end
+
+  local item = nil
+  if args.id ~= nil then
+    local want = tostring(args.id)
+    for i = #store.items, 1, -1 do
+      if store.items[i].id == want then item = store.items[i] break end
+    end
+    if item == nil then
+      local ids = {}
+      for i = 1, #store.items do ids[#ids + 1] = tostring(store.items[i].id) end
+      error("没有这个快照:" .. want .. "(现有:" .. table.concat(ids, ", ") .. ")")
+    end
+  else
+    item = store.items[#store.items]
+  end
+
+  -- ---- 目标组:先按快照里的 UUID 全局找,找不到才退回当前组 / 指定位置 ----
+  local ref, grp = findGroupByUuid(item.groupUuid)
+  local locatedBy = "uuid"
+  if grp == nil then
+    locatedBy = "fallback"
+    if args.groupIndex ~= nil or args.trackIndex ~= nil then
+      ref, grp = groupAt(args.trackIndex or 0, args.groupIndex or 0)
+    else
+      ref, grp = currentGroup()
+    end
+  end
+  if grp == nil then
+    error("快照指向的组已经不在了(UUID " .. tostring(item.groupUuid) ..
+          "),当前也没有可编辑的组 ⇒ 拒绝回滚(不猜)")
+  end
+
+  local target = item.notes
+  if type(target) ~= "table" then error("快照内容损坏(notes 不是数组)⇒ 拒绝回滚") end
+
+  -- ---- ① 全量校验:碰宿主之前 ----
+  for i = 1, #target do
+    local n = target[i]
+    if type(n) ~= "table" then error("快照第 " .. i .. " 项损坏 ⇒ 拒绝回滚") end
+    local onset, dur, pitch = tonumber(n.onset), tonumber(n.dur), tonumber(n.pitch)
+    if onset == nil or dur == nil or pitch == nil then
+      error("快照第 " .. i .. " 项字段缺失(onset/dur/pitch)⇒ 拒绝回滚")
+    end
+    if onset < 0 then error("快照第 " .. i .. " 项 onset 为负 ⇒ 拒绝回滚") end
+    if dur <= 0 then error("快照第 " .. i .. " 项时值非法(" .. tostring(dur) .. ")⇒ 拒绝回滚") end
+    if pitch < 0 or pitch > 127 then
+      error("快照第 " .. i .. " 项音高越界(" .. tostring(pitch) .. ")⇒ 拒绝回滚")
+    end
+    n.onset, n.dur, n.pitch = math.floor(onset), math.floor(dur), math.floor(pitch)
+  end
+
+  local proj = project()
+  if proj == nil then error("no project") end
+  local beforeCount = num(call(grp, "getNumNotes")) or 0
+  call(proj, "newUndoRecord")
+
+  -- ---- ② 多出来的音符:从**尾部倒序**删 ----
+  -- ⚠️ 两条都要对:`removeNote` 收的是**下标**(不是音符对象,见 delete_notes 的用法),
+  --    而且必须倒序 —— 正序删会让下标漂移,删掉不该删的那个(与 delete_notes 同一条教训)。
+  local removed = 0
+  for i = beforeCount, #target + 1, -1 do
+    call(grp, "removeNote", i)
+    removed = removed + 1
+  end
+
+  -- ---- ③ 按 onset 升序写回;缺的补建 ----
+  local plan = sortedByOnset(target)
+  local written, added = 0, 0
+  for i = 1, #plan do
+    local want = plan[i]
+    local nt = call(grp, "getNote", i)
+    if nt == nil then
+      nt = SC("create", "Note")
+      if nt == nil then
+        error("SV:create(\"Note\") 返回 nil ⇒ 回滚中断(已写回的部分不回退,可再 restore 一次)")
+      end
+      call(nt, "setTimeRange", want.onset, want.dur)
+      call(nt, "setPitch", want.pitch)
+      if #want.lyrics > 0 then call(nt, "setLyrics", want.lyrics) end
+      call(grp, "addNote", nt)
+      added = added + 1
+    else
+      call(nt, "setTimeRange", want.onset, want.dur)
+      call(nt, "setPitch", want.pitch)
+      call(nt, "setLyrics", want.lyrics)
+      written = written + 1
+    end
+  end
+
+  -- ---- ④ 回读核对(写完读回来比,这是本仓库的纪律) ----
+  -- 按**排序后的多重集**比,而不是按下标比:回滚要保证的是"音符内容一致",
+  -- 存储顺序是宿主的实现细节(addNote 按 onset 插),按下标比会误报。
+  local after = captureNotes(grp)
+  local a = sortedByOnset(after)
+  local w = sortedByOnset(target)
+  local mismatch = {}
+  if #a ~= #w then
+    mismatch[#mismatch + 1] = string.format("条数 %d ≠ 快照 %d", #a, #w)
+  else
+    for i = 1, #w do
+      if a[i].onset ~= w[i].onset or a[i].dur ~= w[i].dur or
+         a[i].pitch ~= w[i].pitch or a[i].lyrics ~= w[i].lyrics then
+        if #mismatch < 5 then
+          mismatch[#mismatch + 1] = string.format(
+            "第 %d 个:读回 %d/%d/%d/%s ≠ 快照 %d/%d/%d/%s", i - 1,
+            a[i].onset, a[i].dur, a[i].pitch, tostring(a[i].lyrics),
+            w[i].onset, w[i].dur, w[i].pitch, tostring(w[i].lyrics))
+        end
+      end
+    end
+  end
+
+  return {
+    restored = true, id = item.id, snapshotTs = item.ts, label = item.label,
+    groupName = call(grp, "getName"), groupUuid = call(grp, "getUUID"),
+    locatedBy = locatedBy,
+    beforeCount = beforeCount, targetCount = #w, afterCount = #a,
+    written = written, added = added, removed = removed,
+    mismatchCount = #mismatch, mismatch = mismatch,
+    verdict = (#mismatch == 0) and "OK:与快照逐音符一致(按 onset 排序比对)"
+      or "⚠️ 回读与快照不一致 —— 见 mismatch",
+    covers = "onset / duration / pitch / lyrics",
+    notCovered = "属性层(音素 / detune / attributes)、组的新建与删除、自动化曲线、声音属性、速度与拍号标记",
+  }
+end
+
+-- ---- selftest ------------------------------------------------------------
+-- 全链路自检:目录可写 · 原子替换(目标已存在时的 rename 覆盖)· 读回 · 删除 ·
+--             心跳 · 日志 · 计时链 · 宿主与工程可读 · 快照存储。
+-- 为什么要有它:「桥不在线」有七八种原因(没跑 / 被关 / 两端目录不一致 / 心跳过期 /
+--             宿主被模态框冻住 / 目录不可写…),用户在聊天里描述不出来。
+--             让桥自己逐项验一遍,DSH 侧就能给一句**能照做**的结论。
+function OPS.selftest()
+  local checks = {}
+  local okAll = true
+  local function add(name, ok, detail)
+    checks[#checks + 1] = { name = name, ok = ok and true or false, detail = detail }
+    if not ok then okAll = false end
+  end
+
+  add("dir", ST.dir ~= nil, tostring(ST.dir))
+
+  if ST.dir ~= nil then
+    local probe = joinPath(ST.dir, "svdsh-selftest.tmp")
+    local f = io.open(probe, "w")
+    add("write", f ~= nil, probe)
+    if f then
+      f:write("v1")
+      f:close()
+      local atom = writeAtomic(probe, "v2")     -- 目标已存在 ⇒ 走 rename 覆盖那条路
+      local back = readFile(probe)
+      add("atomic-overwrite", atom and back == "v2",
+          "rename=" .. tostring(atom) .. " 读回=" .. tostring(back))
+      pcall(function() os.remove(probe) end)
+      add("remove", readFile(probe) == nil, probe)
+    end
+  end
+
+  local hbOk = false
+  if writeHeartbeatRef ~= nil then hbOk = pcall(writeHeartbeatRef) end
+  local hb = readFile(PATH.hb)
+  add("heartbeat", hbOk and type(hb) == "string" and #hb > 0, tostring(PATH.hb))
+
+  log("selftest")
+  local lg = readFile(PATH.log)
+  add("log", type(lg) == "string" and #lg > 0, tostring(PATH.log))
+
+  add("timer", ST.timerWhere ~= nil, tostring(ST.timerWhere))
+  add("ticks", (tonumber(ST.ticks) or 0) > 0, tostring(ST.ticks))
+
+  add("host", type(ST.hostName) == "string" and #ST.hostName > 0, tostring(ST.hostName))
+  local proj = project()
+  local fname = nil
+  if proj ~= nil then fname = call(proj, "getFileName") end
+  add("project", proj ~= nil, tostring(fname))
+
+  local store = snapLoad()
+  add("snapshot-store", snapSave(store), snapPath())
+
+  return {
+    ok = okAll, bridge = BRIDGE_VERSION, protocol = PROTOCOL, dir = ST.dir,
+    host = ST.host, hostName = ST.hostName, hostVersion = ST.hostVer,
+    lua = _VERSION, timer = ST.timerWhere, session = ST.session,
+    ticks = ST.ticks, reqSeen = ST.reqSeen, opsRun = ST.opsRun, pollErrors = ST.pollErrors,
+    opCount = #OP_NAMES, snapshotCount = #store.items,
+    checks = checks,
+    verdict = okAll and "全链路自检通过" or "有项目未通过 —— 看 checks 里 ok=false 的那几条",
+  }
+end
+
 -- ---- stop ----------------------------------------------------------------
 function OPS.stop()
   log("stop: 桥按请求退出(改完源码后需要重跑本脚本)")
@@ -5003,6 +5378,9 @@ local function writeHeartbeat()
   }))
 end
 
+-- 把 selftest 要用的前向引用接上(见第 5b 节的说明)
+writeHeartbeatRef = writeHeartbeat
+
 local function scheduleLoop()
   -- ⚠️ 轮询、面板中继、心跳**必须共用这一条链**。
   --    拆成多条会出「心跳照常跳、轮询已经死」的静默故障。
@@ -5092,7 +5470,7 @@ end
 local function fatal(reason, extra)
   local payload = {
     ok = false, reason = tostring(reason), bridge = BRIDGE_VERSION, lua = _VERSION,
-    dir = ST.dir or (os.getenv and (os.getenv("TEMP") or "")) or "",
+    dir = ST.dir or envTmpDir() or "",
     timer = ST.timerWhere, ts = os.time(),
   }
   if type(extra) == "table" then
@@ -5100,7 +5478,7 @@ local function fatal(reason, extra)
   end
   -- ⚠️ 只写文件与日志,**绝不弹信息框**(弹框会冻住宿主,而且用户可能看不到)
   pcall(function()
-    local dir = ST.dir or (os.getenv and os.getenv("TEMP"))
+    local dir = ST.dir or envTmpDir()
     if dir then writeAtomic(joinPath(dir, "svdsh-boot-sv.json"), jenc(payload)) end
   end)
   log("FATAL: " .. tostring(reason))
@@ -5201,9 +5579,13 @@ if type(SVDSH_TEST) == "table" then
   SVDSH_TEST.pollOnce = pollOnce
   SVDSH_TEST.writeHeartbeat = writeHeartbeat
   SVDSH_TEST.pickDir = pickDir
+  SVDSH_TEST.dirCandidates = dirCandidates
   SVDSH_TEST.buildPaths = buildPaths
   SVDSH_TEST.sepFor = sepFor
   SVDSH_TEST.joinPath = joinPath
+  SVDSH_TEST.captureNotes = captureNotes
+  SVDSH_TEST.snapLoad = snapLoad
+  SVDSH_TEST.sortedByOnset = sortedByOnset
   SVDSH_TEST.CFG = CFG
   SVDSH_TEST.ST = ST
   SVDSH_TEST.PATH = PATH

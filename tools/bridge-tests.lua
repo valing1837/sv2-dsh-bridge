@@ -260,6 +260,63 @@ function __T_opnames()
   return table.concat(names, ",")
 end
 
+-- ---- 0.8.0:跨平台目录候选 + 快照 / 回滚 ------------------------------------
+-- 目录候选写成"注入 getenv"的纯函数,所以**任何平台**的 CI 都能验证 macOS 的顺序:
+-- 桥原来只认 USERPROFILE / TEMP / TMP,macOS 上三个都不存在 ⇒ 候选为空 ⇒ 桥直接起不来,
+-- 而 DSH 插件用的是 os.homedir() / os.tmpdir()。
+function __T_dircands(kind)
+  local env
+  if kind == "win" then
+    env = { USERPROFILE = "C:\\Users\\u", TEMP = "C:\\Temp" }
+  elseif kind == "mac" then
+    env = { HOME = "/Users/u", TMPDIR = "/var/folders/t" }
+  elseif kind == "empty" then
+    env = {}
+  else
+    error("unknown kind: " .. tostring(kind))
+  end
+  return T.jenc(T.dirCandidates(function(k) return env[k] end))
+end
+
+local function snapFilePath() return T.joinPath(T.ST.dir, "svdsh-snapshots-sv.json") end
+
+function __T_snapReset()
+  pcall(function() os.remove(snapFilePath()) end)
+  return snapFilePath()
+end
+
+function __T_snapRaw()
+  local f = io.open(snapFilePath(), "r")
+  if not f then return "" end
+  local s = f:read("*a")
+  f:close()
+  return s or ""
+end
+
+function __T_snapWrite(text)
+  local f = io.open(snapFilePath(), "w")
+  if not f then return false end
+  f:write(text)
+  f:close()
+  return true
+end
+
+-- 宿主世界里当前组的音符状态(**按 onset 排序**),用来断言"回滚回去了"。
+-- 排序是为了不受存储顺序影响:真机 addNote 是按 onset 插进组里的,存储顺序是实现细节。
+function __T_notesState()
+  local out = {}
+  for i = 1, #H.notes do
+    local n = H.notes[i]
+    out[i] = { onset = n:getOnset(), dur = n:getDuration(),
+               pitch = n:getPitch(), lyrics = n:getLyrics() }
+  end
+  table.sort(out, function(a, b)
+    if a.onset == b.onset then return a.pitch < b.pitch end
+    return a.onset < b.onset
+  end)
+  return T.jenc(out)
+end
+
 -- 属性的确定性序列化。
 -- ⚠️ 不能对表用 tostring:那给的是**内存地址**,同一个值两次快照可能不一样,
 --    "一个字节都没写"这条断言就会变成偶发红。逐音素属性数组正是个表

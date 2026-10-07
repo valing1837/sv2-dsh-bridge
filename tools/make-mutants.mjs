@@ -408,6 +408,35 @@ end`]]],
     'joinPath: hardcode the "\\\\" separator (POSIX: every path becomes a FILE whose name contains a backslash, so the bridge silently writes into the wrong place)',
     [['local function joinPath(dir, name) return dir .. sepFor(dir) .. name end',
       'local function joinPath(dir, name) return dir .. "\\\\" .. name end   -- MUTANT: separator hardcoded to Windows']]],
+
+  // ---- 0.8.0:目录候选 / 快照 / 回滚 -----------------------------------------
+
+  // 桥原来只认 Windows 的目录变量。macOS 上三个都不存在 ⇒ 候选为空 ⇒ 桥直接起不来,
+  // 而 DSH 插件用 os.homedir() / os.tmpdir() 已经把目录建好了。test 41 在任何平台都守它。
+  ['dir-candidates-windows-only',
+    'dirCandidates: go back to USERPROFILE / TEMP / TMP only (macOS then has ZERO candidates ⇒ the bridge dies with "no writable channel dir")',
+    [['local home = getenv("USERPROFILE") or getenv("HOME")',
+      'local home = getenv("USERPROFILE")   -- MUTANT: HOME ignored'],
+     ['local tmp = getenv("TEMP") or getenv("TMP") or getenv("TMPDIR")',
+      'local tmp = getenv("TEMP") or getenv("TMP")   -- MUTANT: TMPDIR ignored']]],
+
+  // 快照没落盘却报成功 = "以为能回滚,其实没有依据" —— 静默失败里最坏的一种。
+  ['snapshot-not-persisted',
+    'snapshot: build the snapshot but never write it to disk (the caller believes it can roll back)',
+    [['  if not snapSave(store) then',
+      '  if false then   -- MUTANT: snapshot never persisted']]],
+
+  // 回滚按"当前组"而不是快照里的 UUID ⇒ 用户切到别的组之后,回滚会写进**错的组**。
+  ['restore-ignores-group-uuid',
+    'restore: locate the group by "current group" instead of the snapshot UUID (rolling back after the user switched groups writes into the WRONG group)',
+    [['  local ref, grp = findGroupByUuid(item.groupUuid)',
+      '  local ref, grp = nil, nil   -- MUTANT: UUID lookup skipped']]],
+
+  // 删多余音符时从头部删:下标漂移 ⇒ 删掉不该删的音符(与 delete_notes 那条同源)。
+  ['restore-remove-ascending',
+    'restore: remove the surplus notes front-to-back instead of back-to-front (indices shift mid-loop ⇒ the wrong notes are deleted)',
+    [['  for i = beforeCount, #target + 1, -1 do\n    call(grp, "removeNote", i)',
+      '  for i = #target + 1, beforeCount do   -- MUTANT: ascending removal\n    call(grp, "removeNote", i)']]],
 ]
 
 function apply(src, subs, name) {
