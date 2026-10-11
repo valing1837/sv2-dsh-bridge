@@ -68,6 +68,8 @@ node make-mutants.mjs          # 写进 .mutants\，并打印每条的 --bridge 
 | `analyze-audio.py` | 测音频的 **BPM 与第一拍**（纯 numpy）。喂给桥的 `align_audio` | `--selftest`：合成 120BPM 点击轨，要求 BPM 与相位都对 |
 | `analyze-chords.py` | 音频**和弦分析** → 和弦序列 + 可直接写的 `write_notes` 参数 | `--selftest`：合成和弦进行，要求标签按序精确匹配 |
 | `import-musicxml.py` | **MusicXML 乐谱 → 音符**，九条护栏（默认只读预览、SHA-256 写前重算、拒 DOCTYPE/ENTITY、512 上限、复调默认拒…） | `--selftest`：77 条断言 |
+| `track-f0.py` | 从**人声干声**提基频（F0）时间线（纯 numpy：FFT 自相关 + 抛物线细化 + 半频抑制）。喂给下面那个 | `--selftest`：合成音自检 —— 钉住"抽 3 取 1 的**实际**速率是 14700"与时间线长度（这条坑把 3.0s 算成 2.76s、音高整体偏高，也**伪装成过八度错误**） |
+| `compare-pitch.py` | **原唱基频 vs 工程音符**的逐音对照 → "哪几个音差多少音分"，先求时间轴偏移 | `--selftest`：合成的"准 / 短音 scoop / 整段偏低 50 音分 / 准"四段里**只有真错的那个**被报出来；并**反证**"中段量法"在 scoop 上偏得更远（否则"稳定段更准"这条是空的） |
 
 > ⚠️ **干声转音符(CREPE)那套已删** —— SV2 自带的「音频转音符」质量更好，不需要重复造。
 > 删掉的是 `extract-notes.py` / `fetch-crepe.py` / `check-audio-deps.py`、CREPE 模型(6.2MB)
@@ -78,6 +80,10 @@ node make-mutants.mjs          # 写进 .mutants\，并打印每条的 --bridge 
 > `analyze-audio.py` 逼出半速歧义与分析窗延迟；`analyze-chords.py` 逼出"泛音列长得像七和弦"
 > (5 次泛音=大三度、7 次=小七度)导致全部认成 maj7/m7；`import-musicxml.py` 逼出
 > 小节偏移漏累加、`<backup>` 清掉声部位置、以及把和弦误判成重叠。
+> `track-f0.py` 那条"实际速率 14700"被**变异验证过**（把速率改回目标值 ⇒ 5 条断言齐红，
+> 其中 `220Hz→239.9Hz(+150 音分)` 正是实战里那次"+1.5 个半音"的复现）；
+> `compare-pitch.py` 的反证断言则钉住了"**稳定段量法只是更准，不是万能**"——
+> 短音上的 scoop 仍会污染取样，那正是音高曲线最终被整条压平的原因之一。
 
 **假宿主的行为是"有状态的、照真机抄的"**，几个刻意的怪癖各自被某条测试压着：
 
