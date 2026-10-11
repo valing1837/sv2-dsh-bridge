@@ -171,14 +171,14 @@ export const MUTANTS = [
   ['plugin-docs-not-bundled',
     'plugin: BUNDLED_DOCS 里写一个包里没有的名字(清单与文件脱节)',
     'plugin', 'check-file.mjs',
-    [["export const BUNDLED_DOCS = ['全参流程.md', '音频转音符.md']",
+    [["export const BUNDLED_DOCS = ['全参流程.md', '音频转音符.md', '音高对照.md']",
       "export const BUNDLED_DOCS = ['查无此文档.md']   // MUTANT: 清单与文件脱节"]]],
 
   ['plugin-prompt-hardcoded-doc-path',
     'plugin: prompt 里又把文档路径写死成工作区相对路径(工作区一清空就变成空话)',
     'plugin', 'check-file.mjs',
-    [["          fullDoc\n            ? `完整版见 ${fullDoc} —— **动手前先读它**。同目录还有 音频转音符.md。要点:`\n            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',",
-      "          '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:',   // MUTANT: 写死工作区相对路径"]]],
+    [["          fullDoc\n            ? `完整版见 ${fullDoc} —— **动手前先读它**。同目录还有 音频转音符.md、音高对照.md。要点:`\n            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',",
+      "          fullDoc\n            ? '完整版见 sv-dsh/docs/全参流程.md —— **动手前先读它**。要点:'   // MUTANT: 写死工作区相对路径\n            : '完整版流程文档**没有随包发出**(插件目录里没有 docs/)—— 按下面要点做。要点:',"]]],
 
   // ---- 配置夹取(plugin-tests.mjs)------------------------------------------
   // profile 里那几项配置是裸值。写错类型坏的是**行为**,而报错完全看不出原因。
